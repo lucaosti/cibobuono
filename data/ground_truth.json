@@ -1,0 +1,120 @@
+[
+  {
+    "video_id": "O7090lAgXf4",
+    "title": "Forni criminali FROSINONE da DIECI",
+    "video_type": "multi_venue_tour",
+    "city": "Frosinone",
+    "venues": [
+      {
+        "name": "PezZ de Pane",
+        "address": "Piazza Garibaldi, 3, 03100 Frosinone FR",
+        "asr_variants": ["pezze di pane", "pezz de pane", "pezzedipane"]
+      },
+      {
+        "name": "Pizzeria Forno Carlo e Graziella",
+        "address": "",
+        "asr_variants": ["carlo e graziella", "forno carlo e graziella"]
+      }
+    ],
+    "false_positives": ["Arte Bianca", "Marbella", "Seat Marbella Special", "Bakery Name"],
+    "notes": "Arte Bianca is mentioned as a suggestion from viewers and checked on Google, but NOT visited in the video"
+  },
+  {
+    "video_id": "hZBwHfMYPlc",
+    "title": "Cena a 4 mani CRIMINALE",
+    "video_type": "non_review",
+    "city": "",
+    "venues": [],
+    "false_positives": ["Trattoria a quattro mani criminale"],
+    "notes": "Private dinner event with a chef, not a venue review"
+  },
+  {
+    "video_id": "DoQlOJ8xolA",
+    "title": "RIETI criminale",
+    "video_type": "multi_venue_tour",
+    "city": "Rieti",
+    "venues": [
+      {
+        "name": "Pasticceria F.lli Napoleone",
+        "address": "Via Sant'Agnese, 4, 02100 Rieti RI",
+        "asr_variants": ["napoleone", "pasticceria napoleone", "fratelli napoleone"]
+      },
+      {
+        "name": "Rentorteria",
+        "address": "Via Roma, 91, 02100 Rieti RI",
+        "asr_variants": ["rentorteria"]
+      },
+      {
+        "name": "Bar Alimentari Bucci Tito",
+        "address": "Via Tancia, 7, 02100 Rieti RI",
+        "asr_variants": ["bucci tito", "alimentari bucci", "bar alimentari"]
+      }
+    ],
+    "false_positives": ["Alimentari via Tancia", "Caffetteria Napoleone", "Il posto della Mimosa", "Mimosa"],
+    "notes": "Mimosa is a pastry, not a venue name"
+  },
+  {
+    "video_id": "W9sfjeRSnYE",
+    "title": "I panini di Cristo SAN PIETRO",
+    "video_type": "single_venue",
+    "city": "Roma",
+    "venues": [
+      {
+        "name": "Saintwich Roma",
+        "address": "Via della Conciliazione, 2d, 00193 Roma RM",
+        "asr_variants": ["saintwich", "saint wich", "sandwitch"]
+      }
+    ],
+    "false_positives": ["Panini di Cristo Santissimi San Pietro", "panineria via della conciliazione"],
+    "notes": "Monotematic video about one venue near the Vatican"
+  },
+  {
+    "video_id": "Lw1zRMZMlcM",
+    "title": "Hit di Franchino: CONCRETO Roma",
+    "video_type": "single_venue",
+    "city": "Roma",
+    "venues": [
+      {
+        "name": "Concreto",
+        "address": "",
+        "asr_variants": ["concreto"]
+      }
+    ],
+    "false_positives": [],
+    "notes": "Part of 'Hit di Franchino' series — single venue review"
+  },
+  {
+    "video_id": "Sw7GFjkh8DI",
+    "title": "VITERBO criminale",
+    "video_type": "multi_venue_tour",
+    "city": "Viterbo",
+    "venues": [
+      {
+        "name": "Antico Panificio Pianoscarano",
+        "address": "Via Ippolito Nievo, 25, 01100 Viterbo VT",
+        "asr_variants": ["panificio pianoscarano", "antico panificio"]
+      },
+      {
+        "name": "LOLLA Gelato",
+        "address": "Via Carlo Cattaneo 46/0, 01100 Viterbo VT",
+        "asr_variants": ["lolla", "lolla gelato"]
+      },
+      {
+        "name": "Drago's Food",
+        "address": "Via Falcone e Borsellino, 29, 01100 Viterbo VT",
+        "asr_variants": ["drago", "dragos", "drago's food", "dragos food"]
+      }
+    ],
+    "false_positives": [],
+    "notes": ""
+  },
+  {
+    "video_id": "1Q0_b-obVrU",
+    "title": "Salviamo il Comala",
+    "video_type": "non_review",
+    "city": "",
+    "venues": [],
+    "false_positives": ["Comala"],
+    "notes": "Activism video about saving a social center, not a food review"
+  }
+]

@@ -1,0 +1,42 @@
+[
+  {
+    "video_id": "O7090lAgXf4",
+    "channel_id": "franchinoercriminale",
+    "processed_date": "2026-03-06",
+    "status": "processed",
+    "visits_extracted": 2,
+    "flagged_segments": 0
+  },
+  {
+    "video_id": "hZBwHfMYPlc",
+    "channel_id": "franchinoercriminale",
+    "processed_date": "2026-03-06",
+    "status": "processed",
+    "visits_extracted": 0,
+    "flagged_segments": 0
+  },
+  {
+    "video_id": "DoQlOJ8xolA",
+    "channel_id": "franchinoercriminale",
+    "processed_date": "2026-03-06",
+    "status": "processed",
+    "visits_extracted": 3,
+    "flagged_segments": 0
+  },
+  {
+    "video_id": "W9sfjeRSnYE",
+    "channel_id": "franchinoercriminale",
+    "processed_date": "2026-03-06",
+    "status": "processed",
+    "visits_extracted": 1,
+    "flagged_segments": 4
+  },
+  {
+    "video_id": "Lw1zRMZMlcM",
+    "channel_id": "franchinoercriminale",
+    "processed_date": "2026-03-06",
+    "status": "processed",
+    "visits_extracted": 1,
+    "flagged_segments": 0
+  }
+]

@@ -1,0 +1,17 @@
+CiboBuono Dataset License
+
+Copyright (c) 2026 Luca Ostinelli. All rights reserved.
+
+The dataset contained in the data/ directory of this repository
+(including but not limited to channels.json, videos.json, locales.json,
+visits.json, flagged_segments.json, and any derivative files in site/data/)
+is the exclusive property of Luca Ostinelli.
+
+This dataset may NOT be used, copied, modified, merged, published,
+distributed, sublicensed, and/or sold without explicit written
+permission from the owner.
+
+To request permission, open a GitHub Issue on this repository or
+contact the owner directly.
+
+THE DATASET IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.

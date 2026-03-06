@@ -1,0 +1,21 @@
+# YouTube download
+yt-dlp>=2024.0.0
+
+# Transcription (OpenAI Whisper - local, open source)
+openai-whisper>=20231117
+
+# LLM local inference
+llama-cpp-python>=0.2.0
+
+# Geocoding (open source, no API key)
+geopy>=2.4.0
+
+# Fuzzy string matching (deduplication)
+thefuzz[speedup]>=0.22.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Testing
+pytest>=8.0.0
+pytest-cov>=5.0.0

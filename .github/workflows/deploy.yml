@@ -1,0 +1,66 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build
+        working-directory: site
+        run: npm run build
+
+      # Copy data/*.json into the build output so the React app
+      # can fetch them at runtime via relative paths.
+      # This is the ONLY place data is "copied" — it happens at
+      # deploy time, so the site always reflects the latest data.
+      - name: Include data files in build
+        run: |
+          mkdir -p site/dist/data
+          cp data/channels.json site/dist/data/
+          cp data/locales.json site/dist/data/
+          cp data/visits.json site/dist/data/
+          cp data/videos.json site/dist/data/
+          cp data/flagged_segments.json site/dist/data/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
