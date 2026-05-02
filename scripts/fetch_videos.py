@@ -13,6 +13,8 @@ This ensures videos.json is always a complete inventory of every video in every
 channel, with a clear status field showing pipeline progress.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import subprocess
@@ -28,6 +30,8 @@ from scripts.utils import (
     save_json,
     setup_logging,
     today_str,
+    YOUTUBE_EXTRACTOR_ARGS,
+    yt_dlp_command,
 )
 from scripts.schemas import SkippedVideo, Video, VideoStatus
 
@@ -129,10 +133,10 @@ def fetch_video_list(channel_url: str) -> list[dict]:
     try:
         result = subprocess.run(
             [
-                "yt-dlp",
+                *yt_dlp_command(),
                 "--flat-playlist",
                 "--dump-json",
-                "--extractor-args", "youtube:lang=it",
+                *YOUTUBE_EXTRACTOR_ARGS,
                 channel_url,
             ],
             capture_output=True,
@@ -188,11 +192,11 @@ def fetch_video_upload_date(video_id: str) -> str:
     try:
         result = subprocess.run(
             [
-                "yt-dlp",
+                *yt_dlp_command(),
                 "--dump-json",
                 "--no-download",
                 "--no-playlist",
-                "--extractor-args", "youtube:lang=it",
+                *YOUTUBE_EXTRACTOR_ARGS,
                 f"https://youtu.be/{video_id}",
             ],
             capture_output=True,
@@ -209,12 +213,87 @@ def fetch_video_upload_date(video_id: str) -> str:
     return ""
 
 
+def fetch_video_metadata(video_id: str) -> dict:
+    """
+    Fetch structured metadata (title, description, chapters) via yt-dlp JSON dump.
+    Cached as {video_id}_metadata.json. Also refreshes description.txt when present.
+    Returns a dict with keys: title, description, chapters (list of {start_time, title}).
+    """
+    ensure_dirs()
+    meta_path = CACHE_DIR / f"{video_id}_metadata.json"
+    if meta_path.exists():
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+
+    slim: dict = {"title": "", "description": "", "chapters": []}
+    try:
+        result = subprocess.run(
+            [
+                *yt_dlp_command(),
+                "--dump-json",
+                "--no-download",
+                "--no-playlist",
+                *YOUTUBE_EXTRACTOR_ARGS,
+                f"https://youtu.be/{video_id}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            logger.warning(
+                f"yt-dlp metadata failed for {video_id}: "
+                f"{(result.stderr or '')[:300]}"
+            )
+            return slim
+
+        raw = json.loads(result.stdout.strip().split("\n", 1)[0])
+        slim["title"] = (raw.get("title") or "").strip()
+        slim["description"] = (raw.get("description") or "").strip()
+        for ch in raw.get("chapters") or []:
+            if not isinstance(ch, dict):
+                continue
+            slim["chapters"].append(
+                {
+                    "start_time": ch.get("start_time"),
+                    "title": (ch.get("title") or "").strip(),
+                }
+            )
+        meta_path.write_text(
+            json.dumps(slim, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        desc_path = CACHE_DIR / f"{video_id}_description.txt"
+        if slim["description"]:
+            desc_path.write_text(slim["description"], encoding="utf-8")
+        logger.info(
+            f"Fetched metadata for {video_id}: "
+            f"{len(slim['description'])} chars, {len(slim['chapters'])} chapters"
+        )
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+        logger.warning(f"Could not fetch metadata for {video_id}: {e}")
+
+    return slim
+
+
 def fetch_video_description(video_id: str) -> str:
     """
     Fetch the video description from YouTube via yt-dlp.
     Returns description text, or empty string on failure.
     Caches result to avoid repeated API calls.
     """
+    meta_path = CACHE_DIR / f"{video_id}_metadata.json"
+    if meta_path.exists():
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            desc = (data.get("description") or "").strip()
+            if desc:
+                return desc
+        except json.JSONDecodeError:
+            pass
+
     desc_path = CACHE_DIR / f"{video_id}_description.txt"
     if desc_path.exists():
         return desc_path.read_text(encoding="utf-8").strip()
@@ -222,11 +301,11 @@ def fetch_video_description(video_id: str) -> str:
     try:
         result = subprocess.run(
             [
-                "yt-dlp",
+                *yt_dlp_command(),
                 "--print", "description",
                 "--no-download",
                 "--no-playlist",
-                "--extractor-args", "youtube:lang=it",
+                *YOUTUBE_EXTRACTOR_ARGS,
                 f"https://youtu.be/{video_id}",
             ],
             capture_output=True,
@@ -257,13 +336,13 @@ def download_audio(video_id: str, video_url: str) -> Path | None:
         url = video_url if video_url.startswith("http") else f"https://youtu.be/{video_id}"
         result = subprocess.run(
             [
-                "yt-dlp",
+                *yt_dlp_command(),
                 "-x",
                 "--audio-format", "wav",
                 "--audio-quality", "0",
                 "-o", str(output_path),
                 "--no-playlist",
-                "--extractor-args", "youtube:lang=it",
+                *YOUTUBE_EXTRACTOR_ARGS,
                 url,
             ],
             capture_output=True,

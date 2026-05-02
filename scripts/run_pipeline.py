@@ -1,6 +1,9 @@
 """
 run_pipeline.py — Main pipeline orchestrator.
 
+All YouTube sources are Italian; downloader, subtitles, Whisper, geocoding labels,
+and LLM prompts are tuned for Italian (see scripts.utils.CONTENT_LANGUAGE).
+
 Two-phase design:
   Phase 1 (catalog):
       1. Fetch channels from channels_input.txt
@@ -26,14 +29,18 @@ Two-phase design:
 
 Usage:
     python -m scripts.run_pipeline --skip-push --max-videos 10
+    python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 """
 
 import argparse
 import json
+import signal
+from datetime import datetime, timezone
 
 from scripts.utils import (
     CACHE_DIR,
     CHANNELS_JSON,
+    CORRECTIONS_JSON,
     LOCALES_JSON,
     LOGS_DIR,
     PREFETCH_WINDOW,
@@ -53,6 +60,35 @@ from scripts.schemas import VideoStatus
 from scripts.dashboard import Dashboard
 
 logger = setup_logging("pipeline")
+
+# First SIGINT/SIGTERM: finish current video, then stop. Second: KeyboardInterrupt.
+_pipeline_shutdown = {"graceful": False}
+_sig_previous: dict[int, object] = {}
+
+
+def _install_pipeline_signal_handlers() -> None:
+    def handler(signum, frame):
+        if _pipeline_shutdown["graceful"]:
+            logger.warning(
+                "Second interrupt: aborting immediately "
+                "(run --repair-stale-state if visits look inconsistent)"
+            )
+            raise KeyboardInterrupt
+        _pipeline_shutdown["graceful"] = True
+        logger.warning(
+            "Interrupt: will stop after the current video. "
+            "Interrupt again to quit immediately."
+        )
+
+    _sig_previous[signal.SIGINT] = signal.signal(signal.SIGINT, handler)
+    if hasattr(signal, "SIGTERM"):
+        _sig_previous[signal.SIGTERM] = signal.signal(signal.SIGTERM, handler)
+
+
+def _restore_pipeline_signal_handlers() -> None:
+    for sig, prev in list(_sig_previous.items()):
+        signal.signal(sig, prev)
+    _sig_previous.clear()
 
 
 def _count_videos_by_status() -> dict:
@@ -84,10 +120,13 @@ def run_pipeline(
         skip_extract: Skip LLM extraction (useful for testing geocoding/dedup)
         skip_push: Skip git commit and push
         whisper_model: Whisper model size (tiny, base, small, medium, large)
-        max_videos: Max pending videos to process in this run
+        max_videos: Max pending videos to process in this run (0 = all pending)
         no_dashboard: Disable live dashboard (log-only mode)
     """
     ensure_dirs()
+
+    _pipeline_shutdown["graceful"] = False
+    _install_pipeline_signal_handlers()
 
     # ── Dashboard setup ───────────────────────────────────────────────
     dash = Dashboard()
@@ -116,6 +155,11 @@ def run_pipeline(
         dash.state.locales_found = len(load_json(LOCALES_JSON))
         dash.state.visits_created = len(load_json(VISITS_JSON))
         dash.state.flagged = len(load_json(FLAGGED_SEGMENTS_JSON))
+
+    run_report: dict = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "videos": [],
+    }
 
     try:
         _log("Pipeline started")
@@ -163,7 +207,11 @@ def run_pipeline(
         )
 
         pending = get_pending_videos()
-        to_process = pending[:max_videos]
+        to_process = pending if max_videos <= 0 else pending[:max_videos]
+
+        if _pipeline_shutdown["graceful"]:
+            _log("Graceful shutdown requested before Phase 2; exiting")
+            return
 
         _log(
             f"Phase 2: {len(pending)} pending videos, "
@@ -177,8 +225,21 @@ def run_pipeline(
             _log("Pipeline complete (no pending content)")
             return
 
+        if not skip_extract:
+            from scripts.utils import resolve_llm_model_path
+            mp = resolve_llm_model_path()
+            if mp is None:
+                _log(
+                    "FATAL: extraction enabled but no GGUF model found. "
+                    "Add a .gguf under models/ or set CIBOBUONO_LLM_MODEL. "
+                    "Or pass --skip-extract."
+                )
+                raise SystemExit(1)
+
         if use_dash:
             dash.set_video_batch(len(to_process))
+
+        stopped_gracefully = False
 
         # ── Sliding window: pre-download audio for first batch ────────
         prefetch_n = min(PREFETCH_WINDOW, len(to_process))
@@ -196,326 +257,394 @@ def run_pipeline(
         channel_map = {ch["channel_id"]: ch for ch in channels}
 
         for i, video in enumerate(to_process, 1):
-            # Sliding window: trim cache to window size
-            deleted = cleanup_cache(PREFETCH_WINDOW)
-            if deleted:
-                _log(f"  Cache trimmed: {len(deleted)} old files removed")
+            if _pipeline_shutdown["graceful"]:
+                stopped_gracefully = True
+                _log("Graceful shutdown: not starting another video")
+                break
+            recap: dict = {
+                "video_id": video["video_id"],
+                "title": (video.get("title") or "")[:200],
+            }
+            try:
+                # Sliding window: trim cache to window size
+                deleted = cleanup_cache(PREFETCH_WINDOW)
+                if deleted:
+                    _log(f"  Cache trimmed: {len(deleted)} old files removed")
 
-            video_id = video["video_id"]
-            channel_id = video["channel_id"]
-            channel_info = channel_map.get(channel_id, {})
-            channel_rubriche = channel_info.get("rubriche", [])
-            v_title = video.get("title", video_id)
+                video_id = video["video_id"]
+                channel_id = video["channel_id"]
+                channel_info = channel_map.get(channel_id, {})
+                channel_rubriche = channel_info.get("rubriche", [])
+                v_title = video.get("title", video_id)
 
-            if use_dash:
-                dash.update_video(i, v_title)
+                if use_dash:
+                    dash.update_video(i, v_title)
 
-            _log(f"[{i}/{len(to_process)}] {v_title[:70]}")
+                _log(f"[{i}/{len(to_process)}] {v_title[:70]}")
 
-            # Resolve publish_date if not yet known
-            publish_date = video.get("publish_date", "")
-            if not publish_date:
-                _log(f"  Resolving publish date for {video_id}...")
-                publish_date = fetch_video_upload_date(video_id)
+                # Resolve publish_date if not yet known
+                publish_date = video.get("publish_date", "")
                 if not publish_date:
-                    publish_date = today_str()
+                    _log(f"  Resolving publish date for {video_id}...")
+                    publish_date = fetch_video_upload_date(video_id)
+                    if not publish_date:
+                        publish_date = today_str()
 
-            # Step 3: Download audio
-            if use_dash:
-                dash.set_step("Download audio")
-            _log("  Downloading audio...")
-            audio_path = download_audio(video_id, video["url"])
-            if not audio_path:
-                _log(f"  ✗ Audio download failed for {video_id}")
-                update_video_status(video_id, VideoStatus.ERRORED, publish_date)
-                _update_processed(video_id, channel_id, VideoStatus.ERRORED)
+                # Step 3: Download audio
                 if use_dash:
-                    dash.tick_stat("errored")
-                    dash.complete_video()
-                    _refresh_stats()
-                continue
-
-            # Step 4: Transcribe
-            if use_dash:
-                dash.set_step("Transcribe")
-            if not skip_transcribe:
-                _log("  Transcribing...")
-                from scripts.transcribe_video import transcribe_audio
-                transcript = transcribe_audio(video_id, whisper_model)
-                if not transcript:
-                    _log(f"  ✗ Transcription failed for {video_id}")
+                    dash.set_step("Download audio")
+                _log("  Downloading audio...")
+                audio_path = download_audio(video_id, video["url"])
+                if not audio_path:
+                    _log(f"  ✗ Audio download failed for {video_id}")
                     update_video_status(video_id, VideoStatus.ERRORED, publish_date)
                     _update_processed(video_id, channel_id, VideoStatus.ERRORED)
+                    recap["outcome"] = "errored"
+                    recap["step"] = "download_audio"
                     if use_dash:
                         dash.tick_stat("errored")
                         dash.complete_video()
                         _refresh_stats()
                     continue
-            else:
-                _log("  Transcription skipped (cached)")
-                transcript_path = CACHE_DIR / f"{video_id}_transcript.json"
-                if transcript_path.exists():
-                    with open(transcript_path, "r", encoding="utf-8") as f:
-                        transcript = json.load(f)
+
+                # Step 4: Transcribe
+                if use_dash:
+                    dash.set_step("Transcribe")
+                if not skip_transcribe:
+                    _log("  Transcribing...")
+                    from scripts.transcribe_video import transcribe_audio
+                    transcript = transcribe_audio(video_id, whisper_model)
+                    if not transcript:
+                        _log(f"  ✗ Transcription failed for {video_id}")
+                        update_video_status(video_id, VideoStatus.ERRORED, publish_date)
+                        _update_processed(video_id, channel_id, VideoStatus.ERRORED)
+                        recap["outcome"] = "errored"
+                        recap["step"] = "transcribe"
+                        if use_dash:
+                            dash.tick_stat("errored")
+                            dash.complete_video()
+                            _refresh_stats()
+                        continue
                 else:
-                    _log(f"  ✗ No cached transcript for {video_id}")
+                    _log("  Transcription skipped (cached)")
+                    transcript_path = CACHE_DIR / f"{video_id}_transcript.json"
+                    if transcript_path.exists():
+                        with open(transcript_path, "r", encoding="utf-8") as f:
+                            transcript = json.load(f)
+                    else:
+                        _log(f"  ✗ No cached transcript for {video_id}")
+                        update_video_status(video_id, VideoStatus.ERRORED, publish_date)
+                        _update_processed(video_id, channel_id, VideoStatus.ERRORED)
+                        recap["outcome"] = "errored"
+                        recap["step"] = "transcript_cache_missing"
+                        if use_dash:
+                            dash.tick_stat("errored")
+                            dash.complete_video()
+                            _refresh_stats()
+                        continue
+
+                # Step 5: Chunk
+                if use_dash:
+                    dash.set_step("Chunk")
+                _log("  Chunking transcription...")
+                from scripts.chunk_transcription import chunk_transcription
+                chunks = chunk_transcription(transcript)
+                _log(f"  {len(chunks)} chunks created")
+
+                if not chunks:
+                    _log(f"  ✗ No chunks for {video_id}")
                     update_video_status(video_id, VideoStatus.ERRORED, publish_date)
                     _update_processed(video_id, channel_id, VideoStatus.ERRORED)
+                    recap["outcome"] = "errored"
+                    recap["step"] = "chunk"
                     if use_dash:
                         dash.tick_stat("errored")
                         dash.complete_video()
                         _refresh_stats()
                     continue
 
-            # Step 5: Chunk
-            if use_dash:
-                dash.set_step("Chunk")
-            _log("  Chunking transcription...")
-            from scripts.chunk_transcription import chunk_transcription
-            chunks = chunk_transcription(transcript)
-            _log(f"  {len(chunks)} chunks created")
+                # Title intel (used after extract; must exist when skip_extract)
+                video_intel = None
+                youtube_extra: dict | None = None
 
-            if not chunks:
-                _log(f"  ✗ No chunks for {video_id}")
-                update_video_status(video_id, VideoStatus.ERRORED, publish_date)
-                _update_processed(video_id, channel_id, VideoStatus.ERRORED)
+                # Step 6: Extract locales with LLM
                 if use_dash:
-                    dash.tick_stat("errored")
-                    dash.complete_video()
-                    _refresh_stats()
-                continue
+                    dash.set_step("Extract (LLM)")
+                if not skip_extract:
+                    _log("  Extracting locales with LLM...")
+                    from scripts.extract_locales import is_food_review_video
+                    from scripts.extract_pipeline import extract_from_video
+                    from scripts.fetch_videos import (
+                        fetch_video_description,
+                        fetch_video_metadata,
+                        detect_non_food_video,
+                    )
+                    from scripts.video_intelligence import (
+                        analyze_title,
+                        analyze_description,
+                        parse_description_timestamps,
+                    )
 
-            # Step 6: Extract locales with LLM
-            if use_dash:
-                dash.set_step("Extract (LLM)")
-            if not skip_extract:
-                _log("  Extracting locales with LLM...")
-                from scripts.extract_locales import extract_from_video, is_food_review_video
-                from scripts.fetch_videos import fetch_video_description, detect_non_food_video
-                from scripts.video_intelligence import (
-                    analyze_title, analyze_description, get_ground_truth_for_video,
-                )
-                video_description = fetch_video_description(video_id)
-                if video_description:
-                    _log(f"  Video description: {len(video_description)} chars")
+                    ym = fetch_video_metadata(video_id)
+                    video_description = fetch_video_description(video_id)
+                    if not video_description and ym.get("description"):
+                        video_description = ym["description"]
+                    if video_description:
+                        _log(f"  Video description: {len(video_description)} chars")
 
-                # ── Title/description intelligence ──────────────────
-                video_intel = analyze_title(v_title)
-                video_intel = analyze_description(video_description or "", video_intel)
+                    dts = parse_description_timestamps(video_description or "")
+                    youtube_extra = {
+                        "chapters": ym.get("chapters") or [],
+                        "description_timestamps": dts,
+                    }
+                    if youtube_extra["chapters"] or dts:
+                        _log(
+                            f"  YouTube extra: {len(youtube_extra['chapters'])} chapters, "
+                            f"{len(dts)} description timestamps"
+                        )
 
-                # Check ground truth for known overrides
-                gt = get_ground_truth_for_video(video_id)
-                if gt:
-                    _log(f"  Ground truth available for {video_id}")
-                    if gt.get("video_type") == "non_review":
-                        _log(f"  ✗ Skipped (ground truth: non-review): {gt.get('notes', '')}")
+                    # ── Title/description intelligence ──────────────────
+                    video_intel = analyze_title(v_title)
+                    video_intel = analyze_description(video_description or "", video_intel)
+
+                    # Title-based skip for non-review videos
+                    if video_intel.video_type == "non_review" and video_intel.skip_reason:
+                        _log(f"  ✗ Skipped (title analysis: non-review): {video_intel.skip_reason}")
                         update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
                         _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
+                        recap["outcome"] = "skipped_non_review"
                         if use_dash:
                             dash.tick_stat("processed")
                             dash.complete_video()
                             _refresh_stats()
                         continue
-                    # Inject ground truth venue hints
-                    for v in gt.get("venues", []):
-                        video_intel.venue_hints.append({
-                            "name": v["name"],
-                            "address": v.get("address", ""),
-                            "source": "ground_truth",
-                            "confidence": "very_high",
-                        })
-                    if gt.get("city"):
-                        video_intel.city = gt["city"]
 
-                # Title-based skip for non-review videos
-                if video_intel.video_type == "non_review" and video_intel.skip_reason:
-                    _log(f"  ✗ Skipped (title analysis: non-review): {video_intel.skip_reason}")
-                    update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                    _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
-                    if use_dash:
-                        dash.tick_stat("processed")
-                        dash.complete_video()
-                        _refresh_stats()
-                    continue
+                    _log(f"  Intel: type={video_intel.video_type}, city={video_intel.city}, "
+                         f"hints={len(video_intel.venue_hints)}")
 
-                _log(f"  Intel: type={video_intel.video_type}, city={video_intel.city}, "
-                     f"hints={len(video_intel.venue_hints)}")
+                    # Re-check non-food with description
+                    is_nf, nf_reason = detect_non_food_video(v_title, video_description)
+                    if is_nf:
+                        _log(f"  ✗ Skipped (non-food via description): {nf_reason}")
+                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
+                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
+                        recap["outcome"] = "skipped_non_food"
+                        if use_dash:
+                            dash.tick_stat("processed")
+                            dash.complete_video()
+                            _refresh_stats()
+                        continue
 
-                # Re-check non-food with description
-                is_nf, nf_reason = detect_non_food_video(v_title, video_description)
-                if is_nf:
-                    _log(f"  ✗ Skipped (non-food via description): {nf_reason}")
-                    update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                    _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
-                    if use_dash:
-                        dash.tick_stat("processed")
-                        dash.complete_video()
-                        _refresh_stats()
-                    continue
+                    # LLM food-relevance gate
+                    transcript_text = transcript.get("text", "")
+                    is_food, food_reason = is_food_review_video(
+                        v_title, transcript_text, video_description
+                    )
+                    if not is_food:
+                        _log(f"  ✗ Skipped (LLM food-check): {food_reason}")
+                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
+                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
+                        recap["outcome"] = "skipped_food_gate"
+                        if use_dash:
+                            dash.tick_stat("processed")
+                            dash.complete_video()
+                            _refresh_stats()
+                        continue
+                    _log(f"  Food-check: {food_reason}")
 
-                # LLM food-relevance gate
-                transcript_text = transcript.get("text", "")
-                is_food, food_reason = is_food_review_video(
-                    v_title, transcript_text, video_description
-                )
-                if not is_food:
-                    _log(f"  ✗ Skipped (LLM food-check): {food_reason}")
-                    update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                    _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
-                    if use_dash:
-                        dash.tick_stat("processed")
-                        dash.complete_video()
-                        _refresh_stats()
-                    continue
-                _log(f"  Food-check: {food_reason}")
+                    extractions, flagged_extractions = extract_from_video(
+                        video_id,
+                        chunks,
+                        channel_rubriche,
+                        video_description,
+                        video_title=v_title,
+                        video_intel=video_intel,
+                        youtube_extra=youtube_extra,
+                        transcript=transcript,
+                    )
+                    _log(f"  {len(extractions)} locales, {len(flagged_extractions)} flagged")
+                else:
+                    _log("  Extraction skipped")
+                    extractions = []
+                    flagged_extractions = []
 
-                extractions, flagged_extractions = extract_from_video(
-                    video_id, chunks, channel_rubriche, video_description,
-                    video_title=v_title, video_intel=video_intel,
-                )
-                _log(f"  {len(extractions)} locales, {len(flagged_extractions)} flagged")
-            else:
-                _log("  Extraction skipped")
-                extractions = []
-                flagged_extractions = []
+                # Apply title rating to extractions that don't have one
+                if video_intel and video_intel.title_rating:
+                    for e in extractions:
+                        if not e.get("rating"):
+                            e["rating"] = video_intel.title_rating
+                            _log(f"  Applied title rating '{video_intel.title_rating}' to '{e.get('locale_name')}'")
 
-            # Apply title rating to extractions that don't have one
-            if video_intel and video_intel.title_rating:
+                # Flag strong disagreement between title rating and transcript rating
+                if video_intel and video_intel.title_rating and extractions:
+                    from scripts.extract_locales import rating_numeric_core
+                    tr_num = rating_numeric_core(video_intel.title_rating)
+                    if tr_num is not None:
+                        for e in extractions:
+                            er_num = rating_numeric_core(e.get("rating"))
+                            if er_num is None:
+                                continue
+                            if abs(er_num - tr_num) >= 2.0:
+                                _log(
+                                    f"  ⚠ Rating mismatch title={video_intel.title_rating} "
+                                    f"vs extraction={e.get('rating')} ({e.get('locale_name')})"
+                                )
+                                fe = dict(e)
+                                fe["_flag_reason"] = "rating_mismatch_title"
+                                fe["confidence"] = min(float(e.get("confidence", 0.5)), 0.55)
+                                flagged_extractions.append(fe)
+
+                # Correct timestamps: scan full transcript for best mention time
+                from scripts.extract_locales import find_best_timestamp_in_transcript
+
+                from scripts.chunk_transcription import seconds_to_timestamp as _stt
                 for e in extractions:
-                    if not e.get("rating"):
-                        e["rating"] = video_intel.title_rating
-                        _log(f"  Applied title rating '{video_intel.title_rating}' to '{e.get('locale_name')}'")
+                    name = e.get("locale_name", "")
+                    best_ts = find_best_timestamp_in_transcript(name, transcript)
+                    if best_ts is not None:
+                        old_ts = e.get("mention_time", e.get("chunk_start_seconds", 0))
+                        e["mention_time"] = best_ts
+                        e["mention_timestamp"] = _stt(best_ts)
+                        e["chunk_start_seconds"] = best_ts
+                        e["chunk_start"] = _stt(best_ts)
+                        end_ts = best_ts + 90
+                        e["chunk_end"] = _stt(end_ts)
+                        _log(f"  Timestamp corrected for '{name}': {old_ts:.0f}s → {best_ts:.0f}s")
 
-            # Correct timestamps: scan full transcript for best mention time
-            from scripts.extract_locales import find_best_timestamp_in_transcript
-            gt_lookup = {}
-            if gt:
-                for v in gt.get("venues", []):
-                    gt_lookup[v["name"].lower()] = v.get("asr_variants", [])
+                if not extractions and not flagged_extractions:
+                    _log(f"  No locales found in {video_id}")
+                    update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
+                    _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
+                    recap["outcome"] = "processed_empty"
+                    if use_dash:
+                        dash.complete_video()
+                        _refresh_stats()
+                    continue
 
-            from scripts.chunk_transcription import seconds_to_timestamp as _stt
-            for e in extractions:
-                name = e.get("locale_name", "")
-                variants = gt_lookup.get(name.lower(), [])
-                best_ts = find_best_timestamp_in_transcript(name, transcript, variants)
-                if best_ts is not None:
-                    old_ts = e.get("mention_time", e.get("chunk_start_seconds", 0))
-                    e["mention_time"] = best_ts
-                    e["mention_timestamp"] = _stt(best_ts)
-                    e["chunk_start_seconds"] = best_ts
-                    e["chunk_start"] = _stt(best_ts)
-                    # Also fix chunk_end to be ~90s after start (typical segment)
-                    end_ts = best_ts + 90
-                    e["chunk_end"] = _stt(end_ts)
-                    _log(f"  Timestamp corrected for '{name}': {old_ts:.0f}s → {best_ts:.0f}s")
+                # Build set of trusted venue names (high-confidence title/description hints)
+                trusted_venue_names: set[str] = set()
+                if video_intel:
+                    for hint in video_intel.venue_hints:
+                        if hint.get("confidence") in ("very_high", "high"):
+                            trusted_venue_names.add(hint["name"].lower().strip())
 
-            if not extractions and not flagged_extractions:
-                _log(f"  No locales found in {video_id}")
+                def _is_trusted(ext: dict) -> bool:
+                    from thefuzz import fuzz
+                    name_lower = ext.get("locale_name", "").lower().strip()
+                    for tn in trusted_venue_names:
+                        if fuzz.ratio(name_lower, tn) >= 70 or tn in name_lower or name_lower in tn:
+                            return True
+                    return False
+
+                # Step 7: Geocode
+                if use_dash:
+                    dash.set_step("Geocode")
+                if extractions:
+                    _log(f"  Geocoding {len(extractions)} locales...")
+                    from scripts.geocode_locales import geocode_extractions
+                    geocoded, non_geocoded = geocode_extractions(extractions)
+                    for e in non_geocoded:
+                        if _is_trusted(e):
+                            _log(f"  Geocoding failed for trusted venue '{e.get('locale_name')}' — keeping with default coords")
+                            e["lat"] = 0.0
+                            e["lon"] = 0.0
+                            geocoded.append(e)
+                        else:
+                            e["confidence"] = 0.0
+                            e["_flag_reason"] = "geocoding_failed"
+                            flagged_extractions.append(e)
+                    extractions = geocoded
+                    _log(f"  Geocoded: {len(extractions)}, failed: {len(non_geocoded)}")
+
+                # Step 7b: Verify locales exist on OpenStreetMap
+                if use_dash:
+                    dash.set_step("Verify (OSM)")
+                if extractions:
+                    _log(f"  Verifying {len(extractions)} locales on OpenStreetMap...")
+                    from scripts.verify_locales import verify_extractions
+                    verified, not_verified = verify_extractions(extractions)
+                    for e in not_verified:
+                        if _is_trusted(e):
+                            _log(f"  OSM not found for trusted venue '{e.get('locale_name')}' — keeping anyway")
+                            e["osm_verified"] = False
+                            verified.append(e)
+                        else:
+                            e["confidence"] = 0.0
+                            e["_flag_reason"] = "osm_not_found"
+                            flagged_extractions.append(e)
+                    extractions = verified
+                    _log(f"  Verified: {len(extractions)}, not found: {len(not_verified)}")
+
+                # Step 8: Deduplicate
+                if use_dash:
+                    dash.set_step("Deduplicate")
+                if extractions:
+                    _log("  Deduplicating locales...")
+                    from scripts.deduplicate_locales import deduplicate_locales
+                    _, locale_mapping = deduplicate_locales(extractions)
+                else:
+                    locale_mapping = []
+
+                # Step 9: Populate visits + flagged
+                if use_dash:
+                    dash.set_step("Populate")
+                _log("  Populating visits...")
+                from scripts.populate_json import populate_visits, populate_flagged
+
+                new_visits = populate_visits(
+                    locale_mapping, video_id, channel_id, publish_date
+                )
+
+                if flagged_extractions:
+                    _log(f"  Saving {len(flagged_extractions)} flagged segments...")
+                    populate_flagged(flagged_extractions, video_id, channel_id)
+
+                # Step 10: Update status
+                if use_dash:
+                    dash.set_step("Update status")
                 update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
+                _update_processed(
+                    video_id, channel_id, VideoStatus.PROCESSED,
+                    len(new_visits), len(flagged_extractions),
+                )
+
+                _log(f"  ✓ Done: {len(new_visits)} visits, {len(flagged_extractions)} flagged")
+
+                recap["outcome"] = "processed"
+                recap["visits_created"] = len(new_visits)
+                recap["flagged_segments"] = len(flagged_extractions)
+
                 if use_dash:
                     dash.complete_video()
                     _refresh_stats()
-                continue
 
-            # Build set of trusted venue names (ground truth + high-confidence title hints)
-            trusted_venue_names: set[str] = set()
-            if video_intel:
-                for hint in video_intel.venue_hints:
-                    if hint.get("confidence") in ("very_high", "high"):
-                        trusted_venue_names.add(hint["name"].lower().strip())
+                # Sliding window: prefetch next video outside current window
+                next_prefetch = i - 1 + PREFETCH_WINDOW  # i is 1-based
+                if next_prefetch < len(to_process):
+                    nv = to_process[next_prefetch]
+                    download_audio(nv["video_id"], nv["url"])
+            finally:
+                recap.setdefault("outcome", "unknown")
+                run_report["videos"].append(recap)
 
-            def _is_trusted(ext: dict) -> bool:
-                from thefuzz import fuzz
-                name_lower = ext.get("locale_name", "").lower().strip()
-                for tn in trusted_venue_names:
-                    if fuzz.ratio(name_lower, tn) >= 70 or tn in name_lower or name_lower in tn:
-                        return True
-                return False
-
-            # Step 7: Geocode
-            if use_dash:
-                dash.set_step("Geocode")
-            if extractions:
-                _log(f"  Geocoding {len(extractions)} locales...")
-                from scripts.geocode_locales import geocode_extractions
-                geocoded, non_geocoded = geocode_extractions(extractions)
-                for e in non_geocoded:
-                    if _is_trusted(e):
-                        _log(f"  Geocoding failed for trusted venue '{e.get('locale_name')}' — keeping with default coords")
-                        e["lat"] = 0.0
-                        e["lon"] = 0.0
-                        geocoded.append(e)
-                    else:
-                        e["confidence"] = 0.0
-                        e["_flag_reason"] = "geocoding_failed"
-                        flagged_extractions.append(e)
-                extractions = geocoded
-                _log(f"  Geocoded: {len(extractions)}, failed: {len(non_geocoded)}")
-
-            # Step 7b: Verify locales exist on OpenStreetMap
-            if use_dash:
-                dash.set_step("Verify (OSM)")
-            if extractions:
-                _log(f"  Verifying {len(extractions)} locales on OpenStreetMap...")
-                from scripts.verify_locales import verify_extractions
-                verified, not_verified = verify_extractions(extractions)
-                for e in not_verified:
-                    if _is_trusted(e):
-                        _log(f"  OSM not found for trusted venue '{e.get('locale_name')}' — keeping anyway")
-                        e["osm_verified"] = False
-                        verified.append(e)
-                    else:
-                        e["confidence"] = 0.0
-                        e["_flag_reason"] = "osm_not_found"
-                        flagged_extractions.append(e)
-                extractions = verified
-                _log(f"  Verified: {len(extractions)}, not found: {len(not_verified)}")
-
-            # Step 8: Deduplicate
-            if use_dash:
-                dash.set_step("Deduplicate")
-            if extractions:
-                _log("  Deduplicating locales...")
-                from scripts.deduplicate_locales import deduplicate_locales
-                _, locale_mapping = deduplicate_locales(extractions)
-            else:
-                locale_mapping = []
-
-            # Step 9: Populate visits + flagged
-            if use_dash:
-                dash.set_step("Populate")
-            _log("  Populating visits...")
-            from scripts.populate_json import populate_visits, populate_flagged
-
-            new_visits = populate_visits(
-                locale_mapping, video_id, channel_id, publish_date
-            )
-
-            if flagged_extractions:
-                _log(f"  Saving {len(flagged_extractions)} flagged segments...")
-                populate_flagged(flagged_extractions, video_id, channel_id)
-
-            # Step 10: Update status
-            if use_dash:
-                dash.set_step("Update status")
-            update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-            _update_processed(
-                video_id, channel_id, VideoStatus.PROCESSED,
-                len(new_visits), len(flagged_extractions),
-            )
-
-            _log(f"  ✓ Done: {len(new_visits)} visits, {len(flagged_extractions)} flagged")
-
-            if use_dash:
-                dash.complete_video()
-                _refresh_stats()
-
-            # Sliding window: prefetch next video outside current window
-            next_prefetch = i - 1 + PREFETCH_WINDOW  # i is 1-based
-            if next_prefetch < len(to_process):
-                nv = to_process[next_prefetch]
-                download_audio(nv["video_id"], nv["url"])
+        run_report["finished_at"] = datetime.now(timezone.utc).isoformat()
+        run_report["summary"] = {
+            "videos_attempted": len(run_report["videos"]),
+            "processed": sum(1 for v in run_report["videos"] if v.get("outcome") == "processed"),
+            "errored": sum(1 for v in run_report["videos"] if v.get("outcome") == "errored"),
+            "stopped_gracefully": stopped_gracefully,
+        }
+        report_path = (
+            LOGS_DIR
+            / f"run_report_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+        )
+        try:
+            ensure_dirs()
+            with open(report_path, "w", encoding="utf-8") as rf:
+                json.dump(run_report, rf, ensure_ascii=False, indent=2)
+            _log(f"Run report written to {report_path}")
+        except OSError as e:
+            logger.warning(f"Could not write run report: {e}")
 
         # Final cache cleanup
         deleted = cleanup_cache(PREFETCH_WINDOW)
@@ -536,6 +665,7 @@ def run_pipeline(
         _log("Pipeline complete!")
 
     finally:
+        _restore_pipeline_signal_handlers()
         if use_dash:
             dash.stop()
 
@@ -620,8 +750,12 @@ def _print_status():
         print()
 
 
-def _reset_all():
-    """Reset all data, cache, and logs for a fresh start."""
+def _reset_all(reset_all_data: bool = False):
+    """Reset all data, cache, and logs for a fresh start.
+
+    By default, corrections.json is preserved (manual overrides for the site).
+    Pass reset_all_data=True to clear corrections as well.
+    """
     print("Resetting all data, cache, and logs...")
 
     # Reset JSON data files to empty arrays
@@ -632,6 +766,10 @@ def _reset_all():
 
     for f in json_files:
         save_json(f, [])
+
+    if reset_all_data:
+        save_json(CORRECTIONS_JSON, [])
+        print("Also cleared corrections.json")
 
     # Clear cache
     if CACHE_DIR.exists():
@@ -679,7 +817,7 @@ def main():
     )
     parser.add_argument(
         "--max-videos", type=int, default=100,
-        help="Max pending videos to process in this run (default: 100)",
+        help="Max pending videos per run (default: 100); 0 means all pending",
     )
     parser.add_argument(
         "--no-dashboard", action="store_true",
@@ -687,7 +825,19 @@ def main():
     )
     parser.add_argument(
         "--reset", action="store_true",
-        help="Reset all data, cache, and logs before running",
+        help="Reset pipeline JSON, cache, and logs before running (keeps corrections unless --reset-all-data)",
+    )
+    parser.add_argument(
+        "--reset-all-data", action="store_true",
+        help="With --reset, also clear corrections.json",
+    )
+    parser.add_argument(
+        "--repair-stale-state", action="store_true",
+        help="Mark pending videos that already have visits/flagged as processed, then exit",
+    )
+    parser.add_argument(
+        "--repair-dry-run", action="store_true",
+        help="With --repair-stale-state, only print what would change",
     )
     parser.add_argument(
         "--status", action="store_true",
@@ -696,12 +846,30 @@ def main():
 
     args = parser.parse_args()
 
+    if args.repair_dry_run and not args.repair_stale_state:
+        parser.error("--repair-dry-run requires --repair-stale-state")
+
+    if args.repair_stale_state:
+        from scripts.repair_stale_state import repair_stale_video_state
+
+        summary = repair_stale_video_state(dry_run=args.repair_dry_run)
+        print(
+            f"{'Would repair' if summary['dry_run'] else 'Repaired'} "
+            f"{summary['count']} video(s)"
+        )
+        for vid in summary["repaired_video_ids"]:
+            print(f"  - {vid}")
+        return
+
     if args.status:
         _print_status()
         return
 
+    if args.reset_all_data and not args.reset:
+        parser.error("--reset-all-data requires --reset")
+
     if args.reset:
-        _reset_all()
+        _reset_all(reset_all_data=args.reset_all_data)
 
     run_pipeline(
         skip_fetch=args.skip_fetch,

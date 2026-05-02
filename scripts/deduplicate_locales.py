@@ -11,6 +11,8 @@ The deduplication requires BOTH conditions to match:
   like "pizzeria", "forno", and articles are stripped before comparison)
 """
 
+from __future__ import annotations
+
 import math
 from urllib.parse import quote_plus
 

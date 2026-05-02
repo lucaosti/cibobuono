@@ -195,13 +195,13 @@ class TestVisitModel:
             timestamp_start="12:34",
             timestamp_end="13:10",
             youtube_url="https://youtu.be/abc123?t=754",
-            rating=8.5,
+            rating="8.5",
             sentiment=Sentiment.POSITIVE,
             llm_confidence=0.87,
             extraction_date="2026-02-15",
             date="2025-07-20",
         )
-        assert v.rating == 8.5
+        assert v.rating == "8.5"
 
     def test_null_rating(self):
         v = Visit(
@@ -230,7 +230,7 @@ class TestVisitModel:
                 timestamp_start="12:34",
                 timestamp_end="13:10",
                 youtube_url="https://youtu.be/abc123?t=754",
-                rating=15,  # Invalid > 10
+                rating="15",
                 sentiment=Sentiment.POSITIVE,
                 llm_confidence=0.87,
                 extraction_date="2026-02-15",

@@ -1,3 +1,5 @@
+# Pipeline requires Python >=3.10 (PEP 604 unions, typing).
+# System: ffmpeg + ffprobe on PATH (e.g. brew install ffmpeg) for audio + Whisper.
 # YouTube download
 yt-dlp>=2024.0.0
 
@@ -7,11 +9,19 @@ openai-whisper>=20231117
 # LLM local inference
 llama-cpp-python>=0.2.0
 
+# Zero-shot NER (neuro-symbolic venue candidates; CPU/MPS via PyTorch)
+torch>=2.2.0
+transformers>=4.40.0
+gliner>=0.2.0
+
 # Geocoding (open source, no API key)
 geopy>=2.4.0
 
 # Fuzzy string matching (deduplication)
 thefuzz[speedup]>=0.22.0
+
+# Terminal dashboard (run_pipeline)
+rich>=13.0.0
 
 # Data validation
 pydantic>=2.0.0

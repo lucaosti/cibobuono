@@ -10,6 +10,8 @@ Strategy (in priority order):
 Saves transcriptions as JSON in cache/ with segment-level timestamps.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import subprocess
@@ -17,8 +19,10 @@ from pathlib import Path
 
 from scripts.utils import (
     CACHE_DIR,
+    CONTENT_LANGUAGE,
     ensure_dirs,
     setup_logging,
+    yt_dlp_command,
 )
 
 logger = setup_logging("transcribe")
@@ -48,14 +52,14 @@ def _download_youtube_subs(video_id: str) -> Path | None:
     # First try manual Italian subs, then auto-generated
     for sub_args in [
         # Manual subs only
-        ["--write-subs", "--no-write-auto-subs", "--sub-langs", "it"],
+        ["--write-subs", "--no-write-auto-subs", "--sub-langs", CONTENT_LANGUAGE],
         # Auto-generated subs
-        ["--write-auto-subs", "--sub-langs", "it"],
+        ["--write-auto-subs", "--sub-langs", CONTENT_LANGUAGE],
     ]:
         try:
             result = subprocess.run(
                 [
-                    "yt-dlp",
+                    *yt_dlp_command(),
                     "--skip-download",
                     *sub_args,
                     "--sub-format", "vtt",
@@ -182,7 +186,7 @@ def _parse_vtt(vtt_path: Path) -> dict | None:
 
     transcript = {
         "video_id": video_id,
-        "language": "it",
+        "language": CONTENT_LANGUAGE,
         "text": " ".join(full_text_parts),
         "segments": segments,
         "source": "youtube_subs",
@@ -332,7 +336,7 @@ def transcribe_audio(video_id: str, model_name: str = "medium") -> dict | None:
 
     result = model.transcribe(
         str(audio_path),
-        language="it",
+        language=CONTENT_LANGUAGE,
         verbose=False,
         fp16=use_fp16,
         initial_prompt=initial_prompt,
@@ -350,7 +354,7 @@ def transcribe_audio(video_id: str, model_name: str = "medium") -> dict | None:
 
     transcript = {
         "video_id": video_id,
-        "language": result.get("language", "it"),
+        "language": result.get("language", CONTENT_LANGUAGE),
         "text": result.get("text", ""),
         "segments": segments,
         "source": "whisper",

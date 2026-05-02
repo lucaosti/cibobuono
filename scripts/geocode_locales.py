@@ -9,7 +9,7 @@ Caches results to avoid redundant requests.
 import json
 import time
 
-from scripts.utils import CACHE_DIR, ensure_dirs, setup_logging
+from scripts.utils import CACHE_DIR, CONTENT_LANGUAGE, ensure_dirs, setup_logging
 
 logger = setup_logging("geocode")
 
@@ -101,7 +101,9 @@ def geocode_locale(
     for query in queries:
         try:
             _rate_limit()
-            location = geolocator.geocode(query, exactly_one=True, language="it")
+            location = geolocator.geocode(
+                query, exactly_one=True, language=CONTENT_LANGUAGE
+            )
             if location:
                 result = {
                     "lat": round(location.latitude, 4),

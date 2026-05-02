@@ -13,6 +13,8 @@ Safeguards against API instability:
   never caches API failures
 """
 
+from __future__ import annotations
+
 import json
 import re
 import time

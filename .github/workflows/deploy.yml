@@ -25,6 +25,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - name: Validate data JSON
+        run: python -m scripts.validate_data
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -52,6 +66,7 @@ jobs:
           cp data/visits.json site/dist/data/
           cp data/videos.json site/dist/data/
           cp data/flagged_segments.json site/dist/data/
+          if [ -f data/corrections.json ]; then cp data/corrections.json site/dist/data/; fi
 
       - name: Setup Pages
         uses: actions/configure-pages@v4

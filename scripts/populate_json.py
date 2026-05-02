@@ -97,6 +97,8 @@ def create_flagged_segment(
             reason = FlagReason.GEOCODING_FAILED.value
         elif flag == "osm_not_found":
             reason = FlagReason.OSM_NOT_FOUND.value
+        elif flag == "rating_mismatch_title":
+            reason = FlagReason.RATING_TITLE_MISMATCH.value
         elif not extraction.get("locale_name"):
             reason = FlagReason.MISSING_NAME.value
         elif not extraction.get("city") and not extraction.get("address"):

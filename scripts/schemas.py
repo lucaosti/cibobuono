@@ -36,6 +36,7 @@ class FlagReason(str, Enum):
     GEOCODING_FAILED = "geocoding_failed"
     OSM_NOT_FOUND = "osm_not_found"
     AMBIGUOUS_LOCALE = "ambiguous_locale_reference"
+    RATING_TITLE_MISMATCH = "rating_title_transcript_mismatch"
 
 
 # --- Helper functions ---
@@ -157,6 +158,29 @@ class Visit(BaseModel):
             raise ValueError(f"Date must be YYYY-MM-DD format, got: {v}")
         return v
 
+    @field_validator("rating", mode="before")
+    @classmethod
+    def coerce_rating_to_str(cls, v: object) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        if isinstance(v, (int, float)):
+            return str(v)
+        return str(v).strip() if isinstance(v, str) else str(v)
+
+    @field_validator("rating")
+    @classmethod
+    def validate_rating_range(cls, v: Optional[str]) -> Optional[str]:
+        """Allow blogger-style ratings (e.g. '8--', '6++'); reject absurd numeric core > 10."""
+        if v is None:
+            return None
+        m = re.match(r"^(\d+(?:\.\d+)?)", v.replace(",", ".").strip())
+        if not m:
+            return v
+        num = float(m.group(1))
+        if num > 10 or num < 0:
+            raise ValueError(f"Rating numeric part must be 0–10, got: {v}")
+        return v
+
 
 class FlaggedSegment(BaseModel):
     video_id: str = Field(..., description="Reference to videos.json")
@@ -229,3 +253,7 @@ def validate_flagged_segments(data: list[dict]) -> list[FlaggedSegment]:
 
 def validate_processed_videos(data: list[dict]) -> list[ProcessedVideo]:
     return [ProcessedVideo(**item) for item in data]
+
+
+def validate_skipped_videos(data: list[dict]) -> list[SkippedVideo]:
+    return [SkippedVideo(**item) for item in data]

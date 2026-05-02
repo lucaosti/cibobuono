@@ -13,16 +13,12 @@ confirming and enriching rather than discovering from garbled ASR.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from scripts.utils import DATA_DIR, setup_logging
+from scripts.utils import setup_logging
 
 logger = setup_logging("intelligence")
-
-GROUND_TRUTH_FILE = DATA_DIR / "ground_truth.json"
 
 
 @dataclass
@@ -155,6 +151,32 @@ def analyze_title(title: str) -> VideoIntel:
     return intel
 
 
+_DESC_TS_LINE = re.compile(
+    r"^(\d{1,2}:\d{2}(?::\d{2})?)\s+(.+)$",
+)
+
+
+def parse_description_timestamps(description: str) -> list[dict]:
+    """
+    Parse timestamp lines often found in YouTube descriptions, e.g. '1:23 Venue name'.
+    Returns list of {timestamp, label}.
+    """
+    if not description:
+        return []
+    out: list[dict] = []
+    for line in description.splitlines():
+        line = line.strip()
+        m = _DESC_TS_LINE.match(line)
+        if m:
+            out.append(
+                {
+                    "timestamp": m.group(1),
+                    "label": m.group(2).strip()[:200],
+                }
+            )
+    return out
+
+
 def analyze_description(description: str, intel: VideoIntel) -> VideoIntel:
     """Enrich VideoIntel with venue hints from the description."""
     if not description:
@@ -187,53 +209,3 @@ def analyze_description(description: str, intel: VideoIntel) -> VideoIntel:
                 break
 
     return intel
-
-
-def load_ground_truth() -> dict[str, dict]:
-    """Load ground truth indexed by video_id."""
-    if not GROUND_TRUTH_FILE.exists():
-        return {}
-    try:
-        with open(GROUND_TRUTH_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {item["video_id"]: item for item in data}
-    except Exception:
-        return {}
-
-
-def get_ground_truth_for_video(video_id: str) -> dict | None:
-    """Get ground truth data for a specific video, if available."""
-    gt = load_ground_truth()
-    return gt.get(video_id)
-
-
-def build_few_shot_examples() -> str:
-    """Build few-shot examples from ground truth for the LLM prompt."""
-    gt = load_ground_truth()
-    if not gt:
-        return ""
-
-    examples = []
-    for vid_id, gt_data in list(gt.items())[:3]:
-        if gt_data.get("video_type") == "non_review":
-            continue
-        venues = gt_data.get("venues", [])
-        if not venues:
-            continue
-        title = gt_data.get("title", "")
-        venue_strs = [f'"{v["name"]}"' for v in venues]
-        fp_strs = [f'"{fp}"' for fp in gt_data.get("false_positives", [])[:2]]
-
-        example = f'TITLE: "{title}" → CORRECT: {", ".join(venue_strs)}'
-        if fp_strs:
-            example += f' | FALSE POSITIVES (do NOT extract): {", ".join(fp_strs)}'
-        examples.append(example)
-
-    if not examples:
-        return ""
-
-    return (
-        "\nFEW-SHOT EXAMPLES from this channel:\n"
-        + "\n".join(f"  • {e}" for e in examples)
-        + "\n"
-    )

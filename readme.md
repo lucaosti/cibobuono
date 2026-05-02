@@ -6,13 +6,21 @@
 
 An open-source dataset and interactive map of food locales (bakeries, pizzerias, restaurants, etc.) reviewed by Italian YouTube food bloggers. All data is extracted automatically via a **fully local pipeline** using open-source tools only — no paid APIs.
 
-The pipeline transcribes YouTube videos, extracts locale mentions, ratings, and sentiment using a local LLM with self-verification, geocodes addresses via OpenStreetMap, and produces normalized JSON files versioned on GitHub. The React site is deployed automatically via GitHub Pages on every push.
+The pipeline uses **inference only** (no model training or fine-tuning): a local ASR model, a **GLiNER** NER model for venue spans, deterministic rules, and a local instruction-tuned LLM (GGUF) for verification and visit details. **Python 3.10+** is required.
+
+**Language:** all catalogued videos are **Italian**; yt-dlp, subtitle download, Whisper, Nominatim result language, and LLM prompts use Italian (`CONTENT_LANGUAGE` in `scripts/utils.py`).
+
+The pipeline transcribes YouTube videos, proposes venue **candidates** with a local multilingual NER (GLiNER), applies **deterministic Italian visit-vs-mention rules**, and calls the local LLM only as a binary **verifier** (with cited evidence) when rules are ambiguous; ratings and sentiment are filled by the LLM only on accepted visits over a short transcript window. Results are geocoded via OpenStreetMap and written as normalized JSON on GitHub. The React site deploys automatically via GitHub Pages on every push.
 
 ## Live Map
 
 The interactive map is deployed on **GitHub Pages** and updates automatically on every `git push` to `main`. It allows you to explore all reviewed locales with search and sentiment filters.
 
 > **Local preview**: `cd site && npm install && npm run dev`
+
+> **Python venv (pipeline)**: from repo root, `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`, then run `python -m scripts.run_pipeline ...`. Optional: `CIBOBUONO_LLM_MODEL` → a `.gguf` under `models/` or elsewhere; `CIBOBUONO_NER_MODEL` overrides the Hugging Face id for GLiNER (default `urchade/gliner_multi-v2.1`). **PyTorch** is required for NER (CPU or MPS on Apple Silicon); if GLiNER cannot load, a lightweight heuristic fallback still runs.
+
+> **ffmpeg**: required on your `PATH` for yt-dlp audio extraction and for Whisper (`brew install ffmpeg` on macOS).
 
 ## Repository Structure
 
@@ -41,7 +49,10 @@ The interactive map is deployed on **GitHub Pages** and updates automatically on
 │   ├── fetch_videos.py             # Catalog videos, detect recipes/Shorts, download audio
 │   ├── transcribe_video.py         # Transcription: YouTube subs first, Whisper fallback
 │   ├── chunk_transcription.py      # Split transcripts into 90s chunks with 15s overlap
-│   ├── extract_locales.py          # LLM extraction + self-verification (Mistral 7B GGUF)
+│   ├── extract_locales.py          # Shared helpers: food gate, hints, timestamps, LLM handle
+│   ├── ner_candidates.py           # GLiNER venue candidates (+ heuristic fallback)
+│   ├── visit_classifier.py         # Italian rules + LLM yes/no for ambiguous cases
+│   ├── extract_pipeline.py         # Orchestrator: NER → classify → detail LLM → cross-chunk filter
 │   ├── geocode_locales.py          # Nominatim geocoding (free, rate-limited)
 │   ├── verify_locales.py           # OSM verification via Overpass API (anti-false-positive)
 │   ├── deduplicate_locales.py      # Fuzzy name + haversine distance deduplication
@@ -49,6 +60,7 @@ The interactive map is deployed on **GitHub Pages** and updates automatically on
 │   ├── handle_flagged_segments.py  # Import manually reviewed segments
 │   ├── dashboard.py                # Rich live terminal dashboard
 │   ├── push_to_github.py           # Git commit & push
+│   ├── validate_data.py            # Validate data/*.json (Pydantic; CI / local)
 │   └── run_pipeline.py             # Main pipeline orchestrator (2-phase)
 │
 ├── site/                           # React + Vite + TypeScript (GitHub Pages)
@@ -70,6 +82,9 @@ The interactive map is deployed on **GitHub Pages** and updates automatically on
 │   ├── test_dedup.py
 │   ├── test_chunks.py
 │   ├── test_extraction.py
+│   ├── test_ner_candidates.py
+│   ├── test_visit_classifier.py
+│   ├── test_extract_pipeline.py
 │   ├── test_verify.py
 │   ├── test_utils.py
 │   └── test_data_integrity.py
@@ -129,7 +144,7 @@ All JSON files are **normalized** — no nested arrays of IDs inside records. Vi
 | `timestamp_start` | string | MM:SS or HH:MM:SS                               |
 | `timestamp_end`   | string | MM:SS or HH:MM:SS                               |
 | `youtube_url`     | string | Direct link with `?t=` parameter                |
-| `rating`          | float? | 1-10 scale, null if not explicitly stated        |
+| `rating`          | string? | Blogger-stated overall score (e.g. `8`, `8--`, `6++`), null if not stated |
 | `sentiment`       | enum   | `positive` / `neutral` / `negative`              |
 | `rubrica`         | string | Show/series name                                 |
 | `llm_confidence`  | float  | 0-1 extraction confidence                        |
@@ -162,7 +177,7 @@ All JSON files are **normalized** — no nested arrays of IDs inside records. Vi
 | `reviewed_by_human`| bool    | Has been manually reviewed            |
 | `reviewed_date`    | string? | Date of review                        |
 | `locale_name`      | string? | Fill in during review                 |
-| `rating`           | float?  | Fill in during review                 |
+| `rating`           | string? | Fill in during review (e.g. `8`, `8--`) |
 | `city`             | string? | Fill in during review                 |
 
 ### skipped_videos.json
@@ -202,7 +217,7 @@ The pipeline runs in two phases:
 
 **Phase 1 — Catalog**: Fetch all channel videos via yt-dlp. Insert into `videos.json` as `pending`. Recipe videos and YouTube Shorts are detected and moved to `skipped_videos.json`.
 
-**Phase 2 — Process**: For each pending video (newest first, up to `--max-videos`):
+**Phase 2 — Process**: For each pending video (newest first, up to `--max-videos`; use `0` for all pending):
 
 | #  | Step                 | Tool                         | Description                                      |
 |----|----------------------|------------------------------|--------------------------------------------------|
@@ -211,8 +226,8 @@ The pipeline runs in two phases:
 | 3  | Prefetch audio       | yt-dlp                       | Sliding window: pre-download up to 20 audio files|
 | 4  | Transcribe           | YouTube subs / Whisper `medium` | YouTube subtitles first, Whisper fallback       |
 | 5  | Chunk                | Python                       | Split into 90s chunks with 15s overlap           |
-| 6  | Extract              | Mistral 7B (local GGUF)      | Locales, ratings, sentiment (+ video description)|
-| 7  | Verify (LLM)         | Same LLM (2nd pass)          | Self-verification: confirm or reject extractions |
+| 6  | Extract              | GLiNER + rules + local LLM   | NER candidates → visit/mention → detail JSON (ratings) only if visit |
+| 7  | Cross-chunk filter   | Python                       | Keep venue if ≥2 chunks **or** title/description hint protects it |
 | 8  | Geocode              | Nominatim (OSM, free)        | Name + city → lat/lon                            |
 | 9  | Verify (OSM)         | Overpass API (OSM, free)     | Confirm locale exists as real food business      |
 | 10 | Deduplicate          | thefuzz + haversine          | <200m AND name similarity ≥70%                   |
@@ -232,10 +247,21 @@ Options:
   --skip-extract       Skip LLM extraction
   --skip-push          Don't commit/push to GitHub
   --whisper-model      tiny|base|small|medium|large (default: medium)
-  --max-videos N       Max pending videos to process in this run (default: 100)
+  --max-videos N       Max pending videos per run (default: 100); 0 = all pending
   --no-dashboard       Disable live terminal dashboard (log-only mode)
-  --reset              Reset all data, cache, and logs before running
+  --reset              Reset pipeline data JSON, cache, and logs (keeps corrections unless --reset-all-data)
+  --reset-all-data     With --reset, also clear corrections.json
+  --repair-stale-state Mark pending videos that already have visits/flagged as processed, then exit
+  --repair-dry-run     With --repair-stale-state, print only (no writes)
   --status             Show pipeline status summary and exit
+```
+
+**Interrupts (Ctrl+C / SIGTERM)** — First signal: finish the current video, then stop (coherent between videos). Second signal: quit immediately (run `python -m scripts.run_pipeline --repair-stale-state` if a video was left pending after visits were already saved). JSON files are saved via atomic replace to reduce corruption if the process is killed during a write.
+
+**Full catalog re-run example** (after reset, process every pending video, no git push):
+
+```bash
+python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 ```
 
 ### Key Features
@@ -243,15 +269,15 @@ Options:
 - **Newest-first processing**: Videos are processed newest-first because recent YouTube ASR models produce significantly better subtitles for Italian proper nouns.
 - **YouTube subtitles first**: Tries to download YouTube's own subtitles (auto-generated or manual) before falling back to local Whisper. YouTube ASR is far more accurate for Italian proper nouns.
 - **Whisper with `initial_prompt`**: When YouTube subs are unavailable, Whisper `medium` runs with an Italian food terminology prompt to bias transcription toward restaurant names.
-- **Video descriptions as context**: YouTube video descriptions are fetched and included in the LLM extraction prompt, providing locale names, addresses, and links directly from the creator. Venue name hints are extracted from descriptions via regex and passed as a "VENUE HINTS" section.
+- **Video descriptions as context**: Descriptions supply regex-extracted **venue hints** (names/links); hints can protect a candidate so a single-chunk mention still counts as a catalogued visit when rules agree it was a visit.
 - **OSM real-place verification**: After geocoding, each locale is verified against OpenStreetMap via the Overpass API (500m radius, fuzzy name match ≥ 80) — if no matching food establishment exists near the coordinates, the extraction is rejected. This is the strongest anti-false-positive measure.
 - **Sliding window**: Audio files are pre-downloaded in a window of 20. As each video is processed, the oldest is cleaned up and the next is fetched.
-- **Self-verification**: The LLM runs a second pass to verify its own extractions against the original transcription (Generate then Verify pattern).
+- **Neuro-symbolic extraction**: GLiNER proposes spans; Italian regex/heuristics decide many cases; the LLM answers visit yes/no with a quoted evidence span only when rules are unsure (no monolithic “extract everything” prompt).
 - **Non-food video filtering**: Videos with non-food keywords in the title (boxing, gaming, fitness, etc.) are automatically skipped.
 - **Hardware auto-detection**: CPU cores, Apple Silicon / Metal GPU, unified memory are detected at startup. LLM threads, batch size, GPU layers, and mlock are configured dynamically.
 - **Shorts filtering**: YouTube Shorts (URL `/shorts/` or duration ≤60s) are automatically skipped.
 - **Recipe filtering**: Videos with recipe keywords in the title are automatically skipped.
-- **Global model caching**: Both Whisper and LLM models are loaded once per session.
+- **Global model caching**: Whisper, NER, and LLM models are loaded once per session (NER via `transformers`/`gliner`).
 
 ## Tech Stack (100% Open Source, No Paid APIs)
 
@@ -259,7 +285,8 @@ Options:
 |----------------|----------------------------------|------------|
 | Video download | yt-dlp                           | Unlicense  |
 | Transcription  | YouTube subs (yt-dlp) + Whisper (fallback) | MIT |
-| LLM inference  | llama-cpp-python + Mistral 7B GGUF | MIT     |
+| Venue NER      | GLiNER + PyTorch + Hugging Face `transformers` | Apache-2.0 / BSD |
+| LLM inference  | llama-cpp-python + GGUF (e.g. Llama 3.1 8B) | MIT     |
 | Geocoding      | Nominatim (OpenStreetMap)        | ODbL       |
 | Place verification | Overpass API (OpenStreetMap)  | ODbL       |
 | Deduplication  | thefuzz (fuzzy matching)         | MIT        |
@@ -408,13 +435,21 @@ All issues are welcome — even a simple "this is wrong" helps improve the datas
 
 Un dataset open source e una mappa interattiva dei locali (forni, panifici, ristoranti, pizzerie, ecc.) recensiti da food YouTuber italiani. Tutti i dati vengono estratti automaticamente con una **pipeline completamente locale** usando solo strumenti open source — nessuna API a pagamento.
 
-La pipeline trascrive i video YouTube, estrae le menzioni dei locali, i voti e il sentiment usando un LLM locale con auto-verifica, geocodifica gli indirizzi tramite OpenStreetMap e produce file JSON normalizzati versionati su GitHub. Il sito React viene deployato automaticamente su GitHub Pages ad ogni push.
+La pipeline usa **solo inferenza** (nessun training o fine-tuning): ASR locale, modello **GLiNER** per gli span dei locali, regole deterministiche e LLM istruito locale (GGUF) per verifica e dettagli sulle visite. È richiesto **Python 3.10+**.
+
+**Lingua:** tutti i video catalogati sono in **italiano**; yt-dlp, sottotitoli, Whisper, lingua dei risultati Nominatim e prompt LLM sono allineati all’italiano (`CONTENT_LANGUAGE` in `scripts/utils.py`).
+
+La pipeline trascrive i video YouTube, propone **candidati locale** con NER multilingue locale (GLiNER), applica **regole deterministiche** (italiano) visita vs. semplice menzione e interroga l’LLM locale solo come **verificatore** binario (con evidenza citata) quando le regole sono ambigue; voti e sentiment sono richiesti all’LLM solo per le visite accettate su una finestra breve di trascrizione. Geocoding OSM e JSON normalizzati come sopra; deploy del sito React su GitHub Pages ad ogni push.
 
 ## Mappa Interattiva
 
 La mappa è deployata su **GitHub Pages** e si aggiorna automaticamente ad ogni `git push` su `main`. Permette di esplorare tutti i locali recensiti con ricerca e filtri per sentiment.
 
 > **Anteprima locale**: `cd site && npm install && npm run dev`
+
+> **Venv Python (pipeline)**: dalla root, `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`, poi `python -m scripts.run_pipeline ...`. Opzionale: `CIBOBUONO_LLM_MODEL` → `.gguf`; `CIBOBUONO_NER_MODEL` sovrascrive l’id Hugging Face di GLiNER (default `urchade/gliner_multi-v2.1`). **PyTorch** serve per il NER (CPU o MPS su Apple Silicon); se GLiNER non si carica, resta un fallback euristico leggero.
+
+> **ffmpeg**: necessario nel `PATH` per estrazione audio (yt-dlp) e Whisper (su macOS: `brew install ffmpeg`).
 
 ## Struttura della Repository
 
@@ -443,7 +478,10 @@ La mappa è deployata su **GitHub Pages** e si aggiorna automaticamente ad ogni 
 │   ├── fetch_videos.py             # Catalogo video, detection ricette/Shorts, download audio
 │   ├── transcribe_video.py         # Trascrizione: sottotitoli YouTube prima, Whisper fallback
 │   ├── chunk_transcription.py      # Divisione trascrizioni in chunk da 90s con 15s overlap
-│   ├── extract_locales.py          # Estrazione LLM + auto-verifica (Mistral 7B GGUF)
+│   ├── extract_locales.py          # Helper condivisi: gate food, hints, timestamp, handle LLM
+│   ├── ner_candidates.py           # Candidati GLiNER (+ fallback euristico)
+│   ├── visit_classifier.py         # Regole italiane + LLM sì/no se ambiguo
+│   ├── extract_pipeline.py         # Orchestratore: NER → classificazione → LLM dettagli → filtro cross-chunk
 │   ├── geocode_locales.py          # Geocoding Nominatim (gratuito, rate-limited)
 │   ├── verify_locales.py           # Verifica OSM via Overpass API (anti-falsi positivi)
 │   ├── deduplicate_locales.py      # Deduplicazione fuzzy nome + distanza haversine
@@ -451,6 +489,7 @@ La mappa è deployata su **GitHub Pages** e si aggiorna automaticamente ad ogni 
 │   ├── handle_flagged_segments.py  # Importazione segmenti revisionati manualmente
 │   ├── dashboard.py                # Dashboard live nel terminale (Rich)
 │   ├── push_to_github.py           # Commit e push su Git
+│   ├── validate_data.py            # Validazione data/*.json vs Pydantic (CI / locale)
 │   └── run_pipeline.py             # Orchestratore principale della pipeline (2 fasi)
 │
 ├── site/                           # React + Vite + TypeScript (GitHub Pages)
@@ -472,6 +511,9 @@ La mappa è deployata su **GitHub Pages** e si aggiorna automaticamente ad ogni 
 │   ├── test_dedup.py
 │   ├── test_chunks.py
 │   ├── test_extraction.py
+│   ├── test_ner_candidates.py
+│   ├── test_visit_classifier.py
+│   ├── test_extract_pipeline.py
 │   ├── test_verify.py
 │   ├── test_utils.py
 │   └── test_data_integrity.py
@@ -531,7 +573,7 @@ Tutti i file JSON sono **normalizzati** — nessun array di ID annidato nei reco
 | `timestamp_start` | string | MM:SS o HH:MM:SS                                     |
 | `timestamp_end`   | string | MM:SS o HH:MM:SS                                     |
 | `youtube_url`     | string | Link diretto con parametro `?t=`                     |
-| `rating`          | float? | Scala 1-10, null se non espresso nel video            |
+| `rating`          | string? | Voto complessivo come detto dal blogger (es. `8`, `8--`, `6++`), null se assente |
 | `sentiment`       | enum   | `positive` / `neutral` / `negative`                   |
 | `rubrica`         | string | Nome della rubrica                                    |
 | `llm_confidence`  | float  | Confidenza dell'estrazione (0-1)                      |
@@ -564,7 +606,7 @@ Tutti i file JSON sono **normalizzati** — nessun array di ID annidato nei reco
 | `reviewed_by_human`| bool    | Revisionato manualmente                  |
 | `reviewed_date`    | string? | Data della revisione                     |
 | `locale_name`      | string? | Da compilare durante la revisione        |
-| `rating`           | float?  | Da compilare durante la revisione        |
+| `rating`           | string? | Da compilare in revisione (es. `8`, `8--`) |
 | `city`             | string? | Da compilare durante la revisione        |
 
 ### skipped_videos.json
@@ -604,7 +646,7 @@ La pipeline è divisa in due fasi:
 
 **Fase 1 — Catalogo**: Fetch di tutti i video del canale via yt-dlp. Inserimento in `videos.json` con `status=pending`. I video di ricette e gli YouTube Shorts vengono rilevati e spostati in `skipped_videos.json`.
 
-**Fase 2 — Processamento**: Per ogni video pending (dal più recente, fino a `--max-videos`):
+**Fase 2 — Processamento**: Per ogni video pending (dal più recente, fino a `--max-videos`; `0` = tutti i pending):
 
 | #  | Passaggio            | Strumento                    | Descrizione                                          |
 |----|----------------------|------------------------------|------------------------------------------------------|
@@ -613,8 +655,8 @@ La pipeline è divisa in due fasi:
 | 3  | Prefetch audio       | yt-dlp                       | Finestra mobile: pre-scarica fino a 20 file audio   |
 | 4  | Trascrizione         | Sottotitoli YT / Whisper `medium` | Sottotitoli YouTube prima, Whisper fallback     |
 | 5  | Chunking             | Python                       | Dividi in chunk da 90s con overlap 15s              |
-| 6  | Estrazione           | Mistral 7B (GGUF locale)     | Locali, voti, sentiment (+ descrizione video)       |
-| 7  | Verifica (LLM)       | Stesso LLM (2° passaggio)    | Auto-verifica: conferma o rifiuta le estrazioni     |
+| 6  | Estrazione           | GLiNER + regole + LLM locale | Candidati NER → visita/menzione → JSON dettaglio (voti) solo se visita |
+| 7  | Filtro cross-chunk   | Python                       | Mantieni il locale se ≥2 chunk **oppure** hint titolo/descrizione      |
 | 8  | Geocoding            | Nominatim (OSM, gratis)      | Nome + città → lat/lon                              |
 | 9  | Verifica (OSM)       | Overpass API (OSM, gratis)   | Conferma che il locale esiste come attività reale   |
 | 10 | Deduplicazione       | thefuzz + haversine          | <200m E similarità nome ≥70%                        |
@@ -634,10 +676,21 @@ Opzioni:
   --skip-extract       Salta l'estrazione LLM
   --skip-push          Non fare commit/push su GitHub
   --whisper-model      tiny|base|small|medium|large (default: medium)
-  --max-videos N       Max video pending da processare (default: 100)
+  --max-videos N       Max video pending per run (default: 100); 0 = tutti i pending
   --no-dashboard       Disabilita la dashboard live nel terminale
-  --reset              Resetta tutti i dati, cache e log prima di eseguire
+  --reset              Resetta i JSON della pipeline, cache e log (mantiene corrections salvo --reset-all-data)
+  --reset-all-data     Con --reset, azzera anche corrections.json
+  --repair-stale-state Allinea videos.json/processed_videos.json se un video è pending ma ha già visite/flagged, poi esce
+  --repair-dry-run     Con --repair-stale-state, solo stampa (nessuna scrittura)
   --status             Mostra il riepilogo dello stato e termina
+```
+
+**Interruzioni (Ctrl+C / SIGTERM)** — Primo segnale: termina il video corrente, poi si ferma (stato coerente tra un video e l’altro). Secondo segnale: uscita immediata (se serve, `python -m scripts.run_pipeline --repair-stale-state`). I JSON vengono scritti con sostituzione atomica per ridurre file corrotti se il processo muore durante il salvataggio.
+
+**Esempio run completo sul catalogo** (dopo reset, tutti i pending, senza push):
+
+```bash
+python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 ```
 
 ### Funzionalità Chiave
@@ -645,15 +698,15 @@ Opzioni:
 - **Processamento dal più recente**: I video vengono processati dal più recente perché i modelli ASR di YouTube recenti producono sottotitoli significativamente migliori per i nomi propri italiani.
 - **Sottotitoli YouTube prima**: Prova a scaricare i sottotitoli YouTube (auto-generati o manuali) prima di ricorrere a Whisper locale. L'ASR di YouTube è molto più accurato per i nomi propri italiani.
 - **Whisper con `initial_prompt`**: Quando i sottotitoli YouTube non sono disponibili, Whisper `medium` usa un prompt con terminologia food italiana per migliorare il riconoscimento dei nomi dei locali.
-- **Descrizioni video come contesto**: Le descrizioni dei video YouTube vengono scaricate e incluse nel prompt LLM, fornendo nomi, indirizzi e link direttamente dal creatore. I nomi dei locali vengono estratti dalla descrizione via regex e passati come sezione "VENUE HINTS".
+- **Descrizioni video come contesto**: Dalla descrizione si estraggono via regex gli **hint** sui nomi dei locali; un hint può proteggere un candidato così che una sola menzione in un chunk resti una visita catalogata quando le regole confermano la visita.
 - **Verifica OSM dei locali reali**: Dopo il geocoding, ogni locale viene verificato su OpenStreetMap tramite Overpass API (raggio 500m, fuzzy name match ≥ 80) — se nessun locale di ristorazione corrispondente esiste vicino alle coordinate, l'estrazione viene rifiutata. È la misura anti-falsi-positivi più potente.
 - **Finestra mobile**: I file audio vengono pre-scaricati in una finestra di 20. Man mano che un video viene processato, il più vecchio viene cancellato e il prossimo viene scaricato.
-- **Auto-verifica**: L'LLM esegue un secondo passaggio per verificare le proprie estrazioni rispetto alla trascrizione originale (pattern Generate then Verify).
+- **Estrazione neuro-simbolica**: GLiNER propone gli span; regex/euristiche italiane decidono molti casi; l’LLM risponde sì/no visita con uno span di evidenza citato solo se le regole sono incerte (niente prompt monolitico “estrai tutto”).
 - **Filtro video non-food**: I video con keyword non-food nel titolo (boxing, gaming, fitness, ecc.) vengono automaticamente saltati.
 - **Hardware auto-detection**: CPU cores, Apple Silicon / Metal GPU, memoria unificata vengono rilevati allo startup. Thread, batch size, GPU layers e mlock dell'LLM vengono configurati dinamicamente.
 - **Filtro Shorts**: Gli YouTube Shorts (URL `/shorts/` o durata ≤60s) vengono automaticamente saltati.
 - **Filtro ricette**: I video con parole chiave di ricette nel titolo vengono automaticamente saltati.
-- **Caching globale dei modelli**: Whisper e LLM vengono caricati una sola volta per sessione.
+- **Caching globale dei modelli**: Whisper, NER e LLM vengono caricati una sola volta per sessione (NER via `transformers`/`gliner`).
 
 ## Stack Tecnologico (100% Open Source, Nessuna API a Pagamento)
 
@@ -661,7 +714,8 @@ Opzioni:
 |----------------|----------------------------------|------------|
 | Download video | yt-dlp                           | Unlicense  |
 | Trascrizione   | Sottotitoli YouTube (yt-dlp) + Whisper (fallback) | MIT |
-| Inferenza LLM  | llama-cpp-python + Mistral 7B GGUF | MIT     |
+| NER locali     | GLiNER + PyTorch + Hugging Face `transformers` | Apache-2.0 / BSD |
+| Inferenza LLM  | llama-cpp-python + GGUF (es. Llama 3.1 8B) | MIT     |
 | Geocoding      | Nominatim (OpenStreetMap)        | ODbL       |
 | Verifica locali | Overpass API (OpenStreetMap)     | ODbL       |
 | Deduplicazione | thefuzz (matching fuzzy)         | MIT        |

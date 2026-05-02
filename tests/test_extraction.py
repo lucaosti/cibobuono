@@ -12,7 +12,9 @@ from scripts.extract_locales import (
     _clean_locale_name,
     extract_hints_from_description,
     is_food_review_video,
+    rating_numeric_core,
 )
+from scripts.video_intelligence import parse_description_timestamps
 
 
 class TestDetectNonFoodVideo:
@@ -262,3 +264,29 @@ class TestExtractHintsFromDescription:
             "mangio tutti i fritti di Sant'Isidoro locale e pizzeria"
         )
         assert len(hints) >= 1
+
+
+class TestParseDescriptionTimestamps:
+    def test_mm_ss_and_labels(self):
+        desc = "0:00 Intro\n1:30 Da Peppe\n12:05 Outro"
+        rows = parse_description_timestamps(desc)
+        assert len(rows) == 3
+        assert rows[0]["timestamp"] == "0:00"
+        assert "Intro" in rows[0]["label"]
+        assert rows[1]["timestamp"] == "1:30"
+
+    def test_hh_mm_ss(self):
+        desc = "1:02:03 Long video chapter"
+        rows = parse_description_timestamps(desc)
+        assert len(rows) == 1
+        assert rows[0]["timestamp"] == "1:02:03"
+
+    def test_empty(self):
+        assert parse_description_timestamps("") == []
+
+
+class TestRatingNumericCore:
+    def test_modifiers(self):
+        assert rating_numeric_core("8--") == 8.0
+        assert rating_numeric_core("6++") == 6.0
+        assert rating_numeric_core("10") == 10.0

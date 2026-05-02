@@ -5,13 +5,21 @@ Handles JSON I/O, logging, paths, and common operations.
 
 import json
 import logging
+import os
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 # --- Paths ---
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# All channels in this project are Italian food YouTube; keep yt-dlp / ASR / geocoding / LLM aligned.
+CONTENT_LANGUAGE = "it"
+YOUTUBE_EXTRACTOR_ARGS: tuple[str, str] = ("--extractor-args", f"youtube:lang={CONTENT_LANGUAGE}")
+
 DATA_DIR = PROJECT_ROOT / "data"
 CACHE_DIR = PROJECT_ROOT / "cache"
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -25,9 +33,10 @@ VISITS_JSON = DATA_DIR / "visits.json"
 PROCESSED_VIDEOS_JSON = DATA_DIR / "processed_videos.json"
 FLAGGED_SEGMENTS_JSON = DATA_DIR / "flagged_segments.json"
 SKIPPED_VIDEOS_JSON = DATA_DIR / "skipped_videos.json"
+CORRECTIONS_JSON = DATA_DIR / "corrections.json"
 
 # --- Confidence threshold ---
-CONFIDENCE_THRESHOLD = 0.65
+CONFIDENCE_THRESHOLD = 0.72
 
 # --- Deduplication settings ---
 DEDUP_DISTANCE_METERS = 200
@@ -39,6 +48,9 @@ LLM_CONTEXT_SIZE = 8192
 LLM_MAX_TOKENS = 512
 LLM_TEMPERATURE = 0.1
 
+# --- NER (GLiNER zero-shot, HuggingFace id) ---
+NER_MODEL_NAME = os.environ.get("CIBOBUONO_NER_MODEL", "urchade/gliner_multi-v2.1")
+
 # --- Video cleanup ---
 MAX_CACHED_VIDEOS = 20  # Delete oldest videos when cache exceeds this
 
@@ -47,6 +59,31 @@ PREFETCH_WINDOW = 20  # Max audio files to keep pre-downloaded at any time
 
 # --- Verification ---
 LLM_VERIFY = True  # Enable LLM self-verification pass on extracted locales
+
+
+def yt_dlp_command() -> list[str]:
+    """Argv prefix to run yt-dlp via the current interpreter (works inside a venv)."""
+    return [sys.executable, "-m", "yt_dlp"]
+
+
+def resolve_llm_model_path() -> Optional[Path]:
+    """
+    Resolve path to a GGUF model for llama-cpp.
+    Order: CIBOBUONO_LLM_MODEL env (file path), preferred filename in models/,
+    else first *.gguf in models/ (sorted by name).
+    """
+    env = (os.environ.get("CIBOBUONO_LLM_MODEL") or "").strip()
+    if env:
+        p = Path(env).expanduser().resolve()
+        if p.is_file():
+            return p
+    preferred = MODELS_DIR / LLM_MODEL_FILENAME
+    if preferred.is_file():
+        return preferred
+    matches = sorted(MODELS_DIR.glob("*.gguf"))
+    if matches:
+        return matches[0]
+    return None
 
 
 def ensure_dirs():
@@ -96,10 +133,24 @@ def load_json(path: Path) -> list:
 
 
 def save_json(path: Path, data: list) -> None:
-    """Save data to a JSON file with pretty formatting."""
+    """Save data to a JSON file with pretty formatting (atomic replace)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    fd, tmp_path = tempfile.mkstemp(
+        suffix=".json.tmp",
+        prefix=f".{path.name}.",
+        dir=str(path.parent),
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def today_str() -> str:

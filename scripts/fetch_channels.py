@@ -17,6 +17,8 @@ from scripts.utils import (
     load_json,
     save_json,
     setup_logging,
+    YOUTUBE_EXTRACTOR_ARGS,
+    yt_dlp_command,
 )
 from scripts.schemas import Channel
 
@@ -76,11 +78,11 @@ def fetch_channel_metadata(url: str) -> dict | None:
     try:
         result = subprocess.run(
             [
-                "yt-dlp",
+                *yt_dlp_command(),
                 "--dump-json",
                 "--playlist-items", "0",
                 "--flat-playlist",
-                "--extractor-args", "youtube:lang=it",
+                *YOUTUBE_EXTRACTOR_ARGS,
                 url,
             ],
             capture_output=True,
@@ -92,10 +94,10 @@ def fetch_channel_metadata(url: str) -> dict | None:
             # Try alternative: get first video's channel info
             result = subprocess.run(
                 [
-                    "yt-dlp",
+                    *yt_dlp_command(),
                     "--dump-json",
                     "--playlist-items", "1",
-                    "--extractor-args", "youtube:lang=it",
+                    *YOUTUBE_EXTRACTOR_ARGS,
                     url,
                 ],
                 capture_output=True,
@@ -123,11 +125,11 @@ def infer_rubriche_from_titles(url: str, max_videos: int = 50) -> list[str]:
     try:
         result = subprocess.run(
             [
-                "yt-dlp",
+                *yt_dlp_command(),
                 "--flat-playlist",
                 "--dump-json",
                 "--playlist-items", f"1:{max_videos}",
-                "--extractor-args", "youtube:lang=it",
+                *YOUTUBE_EXTRACTOR_ARGS,
                 url,
             ],
             capture_output=True,
