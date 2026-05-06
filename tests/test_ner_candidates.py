@@ -1,5 +1,7 @@
 """Tests for ner_candidates (heuristic fallback; GLiNER mocked)."""
 
+__author__ = "Luca Ostinelli"
+
 from scripts.ner_candidates import Candidate, extract_chunk_candidates
 
 

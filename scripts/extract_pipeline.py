@@ -7,6 +7,9 @@ Replaces monolithic chunk JSON extraction; keeps extract_from_video(...) signatu
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import json
 import re
 from collections import defaultdict
@@ -85,6 +88,28 @@ def _is_protected_name(name: str, video_intel: VideoIntel | None) -> bool:
         if fuzz.ratio(nl, hn) >= 75 or hn in nl or nl in hn:
             return True
     return False
+
+
+def _chapter_start_time(name: str, video_intel: VideoIntel | None) -> float | None:
+    """Return the chapter start_time for a matched venue hint, if available."""
+    if not video_intel or not video_intel.venue_hints:
+        return None
+    from thefuzz import fuzz
+
+    nl = name.lower().strip()
+    best: float | None = None
+    best_score = 0
+    for h in video_intel.venue_hints:
+        if h.get("source") != "chapter":
+            continue
+        hn = (h.get("name") or "").lower().strip()
+        if not hn:
+            continue
+        score = fuzz.ratio(nl, hn)
+        if score > best_score and (score >= 75 or hn in nl or nl in hn):
+            best_score = score
+            best = h.get("start_time")
+    return best
 
 
 def _parse_detail_json(text: str) -> dict | None:
@@ -248,6 +273,15 @@ def extract_from_video(
             }
             if video_intel and video_intel.city and not row["city"]:
                 row["city"] = video_intel.city
+
+            # If a chapter hint provides a precise start time, prefer it over ASR-derived time.
+            chapter_ts = _chapter_start_time(name_clean, video_intel)
+            if chapter_ts is not None:
+                row["mention_time"] = chapter_ts
+                row["chunk_start_seconds"] = chapter_ts
+                row["mention_timestamp"] = seconds_to_timestamp(chapter_ts)
+                row["chunk_start"] = seconds_to_timestamp(chapter_ts)
+                row["chunk_end"] = seconds_to_timestamp(chapter_ts + 90)
 
             visit_hits.append(
                 {

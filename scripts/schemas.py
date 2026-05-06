@@ -5,6 +5,9 @@ All data structures used in the pipeline are defined here.
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import hashlib
 import re
 from datetime import datetime

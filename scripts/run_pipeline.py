@@ -13,10 +13,10 @@ Two-phase design:
       For each pending video (newest first, limited by --max-videos):
       3. Prefetch audio (sliding window of 20 files)
       4. Download audio via yt-dlp
-      5. Transcribe: YouTube subtitles first, Whisper medium fallback
+      5. Transcribe: YouTube subtitles first, Whisper large-v3-turbo fallback
       6. Chunk transcription (90s chunks, 15s overlap)
       6b. Food-relevance gate (LLM classifies: is this a food review video?)
-      7. Extract locales with LLM (Mistral 7B GGUF + video description)
+      7. Extract locales with local LLM (GGUF, auto-selected by RAM + video description)
       8. Self-verify extractions (Generate then Verify pattern)
       9. Geocode via Nominatim (free)
       10. Verify locales exist on OpenStreetMap (Overpass API)
@@ -31,6 +31,10 @@ Usage:
     python -m scripts.run_pipeline --skip-push --max-videos 10
     python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 """
+
+from __future__ import annotations
+
+__author__ = "Luca Ostinelli"
 
 import argparse
 import json
@@ -107,9 +111,10 @@ def run_pipeline(
     skip_transcribe: bool = False,
     skip_extract: bool = False,
     skip_push: bool = False,
-    whisper_model: str = "medium",
+    whisper_model: str = "large-v3-turbo",
     max_videos: int = 100,
     no_dashboard: bool = False,
+    auto_models: bool = True,
 ):
     """
     Run the full pipeline.
@@ -127,6 +132,25 @@ def run_pipeline(
 
     _pipeline_shutdown["graceful"] = False
     _install_pipeline_signal_handlers()
+
+    # ── Auto-select models based on hardware ──────────────────────────
+    from scripts.utils import detect_hardware, select_optimal_models
+    hw = detect_hardware()
+    logger.info(
+        f"Hardware: {hw['cpu_count']} CPU cores, {hw['total_ram_gb']:.1f} GB RAM, "
+        f"Apple Silicon: {hw['is_apple_silicon']}"
+    )
+    if auto_models:
+        selected = select_optimal_models(hw)
+        whisper_model = selected["whisper_model"]
+        chosen_llm = selected["llm_model_path"]
+        logger.info(
+            f"Auto-selected models: Whisper={whisper_model}, "
+            f"LLM={chosen_llm.name if chosen_llm else 'none'} ({selected['llm_tier']})"
+        )
+        if chosen_llm:
+            import os as _os
+            _os.environ.setdefault("CIBOBUONO_LLM_MODEL", str(chosen_llm))
 
     # ── Dashboard setup ───────────────────────────────────────────────
     dash = Dashboard()
@@ -382,6 +406,7 @@ def run_pipeline(
                     from scripts.video_intelligence import (
                         analyze_title,
                         analyze_description,
+                        analyze_chapters,
                         parse_description_timestamps,
                     )
 
@@ -392,20 +417,22 @@ def run_pipeline(
                     if video_description:
                         _log(f"  Video description: {len(video_description)} chars")
 
+                    chapters = ym.get("chapters") or []
                     dts = parse_description_timestamps(video_description or "")
                     youtube_extra = {
-                        "chapters": ym.get("chapters") or [],
+                        "chapters": chapters,
                         "description_timestamps": dts,
                     }
-                    if youtube_extra["chapters"] or dts:
+                    if chapters or dts:
                         _log(
-                            f"  YouTube extra: {len(youtube_extra['chapters'])} chapters, "
+                            f"  YouTube extra: {len(chapters)} chapters, "
                             f"{len(dts)} description timestamps"
                         )
 
-                    # ── Title/description intelligence ──────────────────
+                    # ── Title/description/chapter intelligence ──────────
                     video_intel = analyze_title(v_title)
                     video_intel = analyze_description(video_description or "", video_intel)
+                    video_intel = analyze_chapters(chapters, video_intel)
 
                     # Title-based skip for non-review videos
                     if video_intel.video_type == "non_review" and video_intel.skip_reason:
@@ -811,9 +838,13 @@ def main():
         help="Skip git commit and push",
     )
     parser.add_argument(
-        "--whisper-model", default="medium",
-        choices=["tiny", "base", "small", "medium", "large"],
-        help="Whisper model size (default: medium, best quality/speed for Italian)",
+        "--whisper-model", default=None,
+        choices=["tiny", "base", "small", "medium", "large", "large-v2", "large-v3", "large-v3-turbo"],
+        help="Whisper model size (default: auto-selected based on hardware)",
+    )
+    parser.add_argument(
+        "--no-auto-models", action="store_true",
+        help="Disable automatic model selection; use --whisper-model and CIBOBUONO_LLM_MODEL env instead",
     )
     parser.add_argument(
         "--max-videos", type=int, default=100,
@@ -876,9 +907,10 @@ def main():
         skip_transcribe=args.skip_transcribe,
         skip_extract=args.skip_extract,
         skip_push=args.skip_push,
-        whisper_model=args.whisper_model,
+        whisper_model=args.whisper_model or "large-v3-turbo",
         max_videos=args.max_videos,
         no_dashboard=args.no_dashboard,
+        auto_models=not args.no_auto_models,
     )
 
 

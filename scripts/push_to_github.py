@@ -4,6 +4,10 @@ push_to_github.py — Commit and push updated JSON data files to GitHub.
 Commits only the data/ directory JSON files and pushes to the current branch.
 """
 
+from __future__ import annotations
+
+__author__ = "Luca Ostinelli"
+
 import subprocess
 
 from scripts.utils import DATA_DIR, PROJECT_ROOT, setup_logging, today_str
@@ -21,7 +25,6 @@ def git_commit_and_push(message: str | None = None) -> bool:
         message = f"pipeline: update data {today_str()}"
 
     try:
-        # Check if we're in a git repo
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True,
@@ -32,7 +35,6 @@ def git_commit_and_push(message: str | None = None) -> bool:
             logger.error(f"Not a git repository or git error: {result.stderr}")
             return False
 
-        # Stage data files
         json_files = list(DATA_DIR.glob("*.json"))
         if not json_files:
             logger.info("No JSON files to commit")
@@ -46,7 +48,6 @@ def git_commit_and_push(message: str | None = None) -> bool:
                 timeout=10,
             )
 
-        # Check if there are staged changes
         result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
             capture_output=True,
@@ -57,7 +58,6 @@ def git_commit_and_push(message: str | None = None) -> bool:
             logger.info("No changes to commit")
             return True
 
-        # Commit
         result = subprocess.run(
             ["git", "commit", "-m", message],
             capture_output=True, text=True,
@@ -69,7 +69,6 @@ def git_commit_and_push(message: str | None = None) -> bool:
             return False
         logger.info(f"Committed: {message}")
 
-        # Push
         result = subprocess.run(
             ["git", "push"],
             capture_output=True, text=True,

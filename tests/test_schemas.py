@@ -2,6 +2,8 @@
 Tests for Pydantic schemas and validation.
 """
 
+__author__ = "Luca Ostinelli"
+
 import pytest
 from scripts.schemas import (
     Channel,

@@ -2,6 +2,8 @@
 Tests for deduplication logic.
 """
 
+__author__ = "Luca Ostinelli"
+
 from scripts.deduplicate_locales import (
     haversine_distance,
     name_similarity,

@@ -13,6 +13,9 @@ The deduplication requires BOTH conditions to match:
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import math
 from urllib.parse import quote_plus
 
@@ -199,11 +202,9 @@ def deduplicate_locales(new_locales: list[dict]) -> tuple[list[dict], list[dict]
         lat = new_locale.get("lat", 0)
         lon = new_locale.get("lon", 0)
 
-        # Check for duplicate in existing
         duplicate = find_duplicate(new_locale, existing)
 
         if duplicate:
-            # Merge into existing
             merge_locale(duplicate, new_locale)
             locale_mapping.append({
                 "extraction": new_locale,
@@ -211,7 +212,6 @@ def deduplicate_locales(new_locales: list[dict]) -> tuple[list[dict], list[dict]
                 "action": "merged",
             })
         else:
-            # Create new locale entry
             locale_id = generate_locale_id(name, lat, lon)
             city = new_locale.get("city", "")
             query = f"{name}, {city}" if city else name
@@ -227,7 +227,6 @@ def deduplicate_locales(new_locales: list[dict]) -> tuple[list[dict], list[dict]
                 "category": new_locale.get("category", []),
                 "google_maps_url": google_maps_url,
             }
-            # Validate with pydantic
             try:
                 Locale(**locale_entry)
             except Exception as e:

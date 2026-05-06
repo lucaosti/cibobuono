@@ -2,6 +2,8 @@
 Tests for utility functions.
 """
 
+__author__ = "Luca Ostinelli"
+
 from scripts.utils import (
     load_json,
     save_json,

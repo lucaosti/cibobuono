@@ -13,6 +13,9 @@ confirming and enriching rather than discovering from garbled ASR.
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import re
 from dataclasses import dataclass, field
 
@@ -26,7 +29,7 @@ class VideoIntel:
     """Structured intelligence derived from title + description."""
     video_type: str = "unknown"       # multi_venue_tour | single_venue | non_review | unknown
     city: str = ""
-    venue_hints: list[dict] = field(default_factory=list)  # [{"name": ..., "address": ...}]
+    venue_hints: list[dict] = field(default_factory=list)  # [{"name": ..., "address": ..., "start_time": ...}]
     skip_reason: str = ""             # non-empty → video should be skipped
     series_name: str = ""             # e.g. "Hit di Franchino", "Forni criminali"
     title_rating: str | None = None   # rating extracted from title (e.g., "10" from "da DIECI")
@@ -97,13 +100,11 @@ def analyze_title(title: str) -> VideoIntel:
     """Extract structural intelligence from the video title."""
     intel = VideoIntel()
 
-    # Rating from title (applies to all types)
     rating = _extract_title_rating(title)
     if rating:
         intel.title_rating = rating
         logger.info(f"Title → rating: {rating}")
 
-    # Non-review detection
     for pat in _NON_REVIEW_PATTERNS:
         if pat.search(title):
             intel.video_type = "non_review"
@@ -207,5 +208,73 @@ def analyze_description(description: str, intel: VideoIntel) -> VideoIntel:
             if not hint.get("address"):
                 hint["address"] = addr
                 break
+
+    return intel
+
+
+# ── Chapter titles as high-priority venue hints ───────────────────────────
+
+# Chapter titles that are navigation/intro noise, not venue names
+_NON_VENUE_CHAPTER_WORDS = frozenset({
+    "intro", "introduzione", "conclusione", "outro", "fine", "inizio",
+    "sponsor", "like", "iscriviti", "subscribe", "commenti", "link",
+    "instagram", "tiktok", "facebook", "social", "recap", "riassunto",
+    "credits", "crediti", "pausa", "break",
+})
+
+
+def _is_chapter_venue_name(title: str) -> bool:
+    """Return True if a chapter title looks like a venue name, not navigation noise."""
+    t = title.strip()
+    if len(t) < 3 or len(t) > 80:
+        return False
+    tl = t.lower()
+    if tl in _NON_VENUE_CHAPTER_WORDS:
+        return False
+    if re.fullmatch(r"[\d:#\s]+", t):
+        return False
+    if re.fullmatch(r"\d+", t):
+        return False
+    return True
+
+
+def analyze_chapters(chapters: list[dict], intel: VideoIntel) -> VideoIntel:
+    """
+    Enrich VideoIntel with venue hints from YouTube chapter titles.
+
+    Chapters are the strongest possible hint source — YouTubers in multi-venue
+    formats (e.g. "Roma criminale") name each chapter after the locale they visit.
+    These get confidence="very_high" so they bypass the cross-chunk filter.
+    """
+    if not chapters:
+        return intel
+
+    existing_names = {h["name"].lower() for h in intel.venue_hints}
+    added = 0
+    for ch in chapters:
+        raw = (ch.get("title") or "").strip()
+        if not raw or not _is_chapter_venue_name(raw):
+            continue
+        if raw.lower() in existing_names:
+            continue
+
+        start_time = ch.get("start_time")
+        hint: dict = {
+            "name": raw,
+            "source": "chapter",
+            "confidence": "very_high",
+        }
+        if start_time is not None:
+            hint["start_time"] = float(start_time)
+
+        intel.venue_hints.append(hint)
+        existing_names.add(raw.lower())
+        added += 1
+        logger.info(f"Chapter → venue hint: '{raw}' (t={start_time}s)")
+
+    if added:
+        if intel.video_type == "unknown":
+            intel.video_type = "multi_venue_tour"
+        logger.info(f"Chapters: {added} venue hints added")
 
     return intel

@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "YouTube food locale pipeline + static map site"
 readme = "readme.md"
 requires-python = ">=3.10"
+authors = [{name = "Luca Ostinelli"}]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

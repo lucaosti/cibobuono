@@ -2,6 +2,8 @@
 Tests for transcribe_video module: VTT parsing and scrolling-subtitle dedup.
 """
 
+__author__ = "Luca Ostinelli"
+
 import pytest
 from pathlib import Path
 from scripts.transcribe_video import _parse_vtt

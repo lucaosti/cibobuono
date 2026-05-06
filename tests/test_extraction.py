@@ -4,6 +4,8 @@ cross-chunk consensus, confidence threshold, food-relevance LLM gate, and
 description-based venue hint extraction.
 """
 
+__author__ = "Luca Ostinelli"
+
 from unittest.mock import patch, MagicMock
 
 from scripts.fetch_videos import detect_non_food_video, detect_recipe_video

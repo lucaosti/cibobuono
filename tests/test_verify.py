@@ -2,6 +2,8 @@
 Tests for verify_locales module: name normalization, fuzzy matching, verification flow.
 """
 
+__author__ = "Luca Ostinelli"
+
 from scripts.verify_locales import _normalize_name, _find_best_match
 
 

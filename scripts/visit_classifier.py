@@ -4,6 +4,9 @@ visit_classifier.py — Deterministic visit-vs-mention rules + LLM arbiter for a
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import json
 import re
 from typing import TYPE_CHECKING

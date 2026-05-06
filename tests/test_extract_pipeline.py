@@ -1,5 +1,7 @@
 """Integration tests for extract_pipeline with mocks."""
 
+__author__ = "Luca Ostinelli"
+
 from unittest.mock import MagicMock, patch
 
 from scripts.extract_pipeline import extract_from_video

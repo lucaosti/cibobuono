@@ -5,6 +5,8 @@ After a human reviews flagged_segments.json and fills in missing fields,
 this script imports the corrected data into locales.json and visits.json.
 """
 
+__author__ = "Luca Ostinelli"
+
 from scripts.utils import (
     FLAGGED_SEGMENTS_JSON,
     LOCALES_JSON,
@@ -59,7 +61,6 @@ def process_reviewed_segments() -> tuple[int, int]:
         video_id = segment.get("video_id", "")
         channel_id = segment.get("channel_id", "")
 
-        # Geocode the locale
         geo = geocode_locale(locale_name, city)
         if not geo:
             logger.warning(f"Could not geocode reviewed locale: {locale_name} ({city})")
@@ -69,7 +70,6 @@ def process_reviewed_segments() -> tuple[int, int]:
         lat = geo["lat"]
         lon = geo["lon"]
 
-        # Check for duplicate
         new_locale_data = {
             "name": locale_name,
             "locale_name": locale_name,
@@ -96,7 +96,6 @@ def process_reviewed_segments() -> tuple[int, int]:
                 "lon": lon,
                 "category": [],
             }
-            # Validate with pydantic
             try:
                 Locale(**locale_entry)
             except Exception as e:
@@ -107,7 +106,6 @@ def process_reviewed_segments() -> tuple[int, int]:
             locales_created += 1
             logger.info(f"Created locale from review: {locale_name} ({locale_id})")
 
-        # Create visit
         start_ts = segment.get("timestamp_start", "0:00")
         start_seconds = timestamp_to_seconds(start_ts)
         visit_id = generate_visit_id(video_id, start_seconds)
@@ -135,7 +133,6 @@ def process_reviewed_segments() -> tuple[int, int]:
                 "extraction_date": today_str(),
                 "date": publish_date,
             }
-            # Validate with pydantic
             try:
                 Visit(**visit)
             except Exception as e:
@@ -150,7 +147,6 @@ def process_reviewed_segments() -> tuple[int, int]:
         segment["reviewed_date"] = today_str()
         updated_segments.append(segment)
 
-    # Save all updated files
     save_json(FLAGGED_SEGMENTS_JSON, updated_segments)
     save_json(LOCALES_JSON, locales)
     save_json(VISITS_JSON, visits)

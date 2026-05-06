@@ -3,8 +3,10 @@
 Validate data/*.json against Pydantic schemas. Exit 0 if all OK, 1 on error.
 Used in CI and locally before deploy.
 """
-
 from __future__ import annotations
+
+__author__ = "Luca Ostinelli"
+
 
 import sys
 

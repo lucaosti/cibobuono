@@ -1,5 +1,7 @@
 """Tests for repair_stale_state (pending videos with existing output rows)."""
 
+__author__ = "Luca Ostinelli"
+
 import json
 
 import pytest

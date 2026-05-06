@@ -6,6 +6,10 @@ without any paid API. Uses yt-dlp to scrape channel metadata.
 Infers rubriche from video titles using pattern matching.
 """
 
+from __future__ import annotations
+
+__author__ = "Luca Ostinelli"
+
 import re
 import subprocess
 import json
@@ -215,7 +219,6 @@ def fetch_channels() -> list[dict]:
             "rubriche": rubriche,
         }
 
-        # Validate
         try:
             Channel(**channel)
         except Exception as e:

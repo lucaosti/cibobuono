@@ -2,6 +2,8 @@
 Tests for chunk_transcription module.
 """
 
+__author__ = "Luca Ostinelli"
+
 from scripts.chunk_transcription import (
     chunk_transcription,
     seconds_to_timestamp,

@@ -5,6 +5,8 @@ Validates that all JSON files in data/ conform to schemas
 and that cross-references are consistent.
 """
 
+__author__ = "Luca Ostinelli"
+
 import pytest
 from scripts.utils import DATA_DIR, load_json
 from scripts.schemas import (

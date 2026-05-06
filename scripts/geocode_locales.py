@@ -6,6 +6,10 @@ Rate limited to 1 request/second per Nominatim policy.
 Caches results to avoid redundant requests.
 """
 
+from __future__ import annotations
+
+__author__ = "Luca Ostinelli"
+
 import json
 import time
 
@@ -22,7 +26,6 @@ RATE_LIMIT_SECONDS = 1.1  # Nominatim requires >= 1 second between requests
 
 
 def _load_geocode_cache() -> dict:
-    """Load geocoding cache from disk."""
     if GEOCODE_CACHE_FILE.exists():
         try:
             with open(GEOCODE_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -35,14 +38,12 @@ def _load_geocode_cache() -> dict:
 
 
 def _save_geocode_cache(cache: dict) -> None:
-    """Save geocoding cache to disk."""
     ensure_dirs()
     with open(GEOCODE_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
 def _rate_limit():
-    """Enforce rate limiting for Nominatim."""
     global _last_request_time
     elapsed = time.time() - _last_request_time
     if elapsed < RATE_LIMIT_SECONDS:
@@ -75,7 +76,6 @@ def geocode_locale(
         logger.error("geopy not installed. Install with: pip install geopy")
         return None
 
-    # Build cache key
     cache_key = f"{name}|{city}|{address}".lower().strip()
     cache = _load_geocode_cache()
     if cache_key in cache:
@@ -87,7 +87,6 @@ def geocode_locale(
         timeout=10,
     )
 
-    # Try multiple query strategies
     queries = []
     if address and city:
         queries.append(f"{name}, {address}, {city}, {country}")
@@ -110,7 +109,6 @@ def geocode_locale(
                     "lon": round(location.longitude, 4),
                     "display_name": location.address,
                 }
-                # Cache the result
                 cache[cache_key] = result
                 _save_geocode_cache(cache)
                 logger.info(f"Geocoded '{query}' -> ({result['lat']}, {result['lon']})")

@@ -6,6 +6,9 @@ Venue extraction orchestration lives in scripts.extract_pipeline (NER + rules + 
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import json
 import re
 

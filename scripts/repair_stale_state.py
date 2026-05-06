@@ -8,6 +8,9 @@ This pass marks those videos processed and ensures processed_videos.json has an 
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import argparse
 from collections import defaultdict
 

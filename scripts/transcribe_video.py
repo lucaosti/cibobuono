@@ -12,6 +12,9 @@ Saves transcriptions as JSON in cache/ with segment-level timestamps.
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import json
 import re
 import subprocess
@@ -260,7 +263,7 @@ def find_audio_file(video_id: str) -> Path | None:
     return None
 
 
-def transcribe_audio(video_id: str, model_name: str = "medium") -> dict | None:
+def transcribe_audio(video_id: str, model_name: str = "large-v3-turbo") -> dict | None:
     """
     Get transcription for a video.
     
@@ -377,7 +380,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     vid = sys.argv[1]
-    model = sys.argv[2] if len(sys.argv) > 2 else "medium"
+    model = sys.argv[2] if len(sys.argv) > 2 else "large-v3-turbo"
     result = transcribe_audio(vid, model)
     if result:
         print(f"Transcribed {vid}: {len(result['segments'])} segments")

@@ -7,7 +7,7 @@ yt-dlp>=2024.0.0
 openai-whisper>=20231117
 
 # LLM local inference
-llama-cpp-python>=0.2.0
+llama-cpp-python>=0.3.22
 
 # Zero-shot NER (neuro-symbolic venue candidates; CPU/MPS via PyTorch)
 torch>=2.2.0

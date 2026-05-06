@@ -20,6 +20,8 @@ Usage (integrated into run_pipeline.py):
     dash.stop()
 """
 
+__author__ = "Luca Ostinelli"
+
 from __future__ import annotations
 
 import os
@@ -319,7 +321,6 @@ class Dashboard:
             expand=True,
         )
 
-        # ── Assemble ─────────────────────────────────────────────────
         body = Group(
             Align.center(header),
             "",

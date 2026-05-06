@@ -6,6 +6,10 @@ Updates processed_videos.json for incrementality tracking.
 Routes low-confidence extractions to flagged_segments.json for manual review.
 """
 
+from __future__ import annotations
+
+__author__ = "Luca Ostinelli"
+
 from scripts.utils import (
     FLAGGED_SEGMENTS_JSON,
     PROCESSED_VIDEOS_JSON,
@@ -70,7 +74,6 @@ def create_visit(
             "date": publish_date,
         }
 
-        # Validate
         Visit(**visit_data)
         return visit_data
 
@@ -124,7 +127,6 @@ def create_flagged_segment(
         "city": extraction.get("city"),
     }
 
-    # Validate with pydantic model
     try:
         FlaggedSegment(**segment)
     except Exception as e:
@@ -160,7 +162,6 @@ def populate_visits(
             new_visits.append(visit)
             existing_visit_ids.add(visit["visit_id"])
 
-    # Save visits
     if new_visits:
         all_visits = existing_visits + new_visits
         save_json(VISITS_JSON, all_visits)

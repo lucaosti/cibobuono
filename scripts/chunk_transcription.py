@@ -5,6 +5,8 @@ Groups Whisper segments into chunks of ~1-2 minutes for optimal LLM context.
 Each chunk includes overlap to avoid missing locale mentions at boundaries.
 """
 
+__author__ = "Luca Ostinelli"
+
 from scripts.schemas import timestamp_to_seconds as _strict_ts_to_seconds
 from scripts.utils import setup_logging
 
@@ -67,7 +69,6 @@ def chunk_transcription(
         logger.warning(f"No segments found for video {video_id}")
         return []
 
-    # Total duration from last segment
     total_duration = segments[-1].get("end", 0)
     if total_duration == 0:
         logger.warning(f"Video {video_id} has zero duration")
@@ -80,12 +81,10 @@ def chunk_transcription(
     while chunk_start < total_duration:
         chunk_end = min(chunk_start + chunk_duration, total_duration)
 
-        # Collect segments that fall within this chunk window
         chunk_segments = []
         for seg in segments:
             seg_start = seg.get("start", 0)
             seg_end = seg.get("end", 0)
-            # Include segment if it overlaps with chunk window
             if seg_end > chunk_start and seg_start < chunk_end:
                 chunk_segments.append(seg)
 
@@ -114,7 +113,6 @@ def chunk_transcription(
 
             chunk_index += 1
 
-        # Move to next chunk with overlap
         chunk_start = chunk_end - overlap
         if chunk_start >= total_duration:
             break

@@ -6,6 +6,9 @@ Maps character spans in chunk text to approximate segment start times for visit 
 
 from __future__ import annotations
 
+__author__ = "Luca Ostinelli"
+
+
 import re
 from dataclasses import dataclass
 

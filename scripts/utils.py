@@ -3,6 +3,10 @@ Shared utility functions for the pipeline.
 Handles JSON I/O, logging, paths, and common operations.
 """
 
+from __future__ import annotations
+
+__author__ = "Luca Ostinelli"
+
 import json
 import logging
 import os
@@ -43,13 +47,17 @@ DEDUP_DISTANCE_METERS = 200
 DEDUP_NAME_SIMILARITY_THRESHOLD = 70  # thefuzz score 0-100
 
 # --- LLM settings ---
-LLM_MODEL_FILENAME = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+# Recommended: Qwen2.5-32B-Instruct-Q4_K_M.gguf (~20 GB, fits in 32 GB unified memory)
+# or Llama-3.3-70B-Instruct-Q2_K.gguf (~22 GB) for best Italian understanding.
+# Current 8B fallback: Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+LLM_MODEL_FILENAME = "Qwen2.5-32B-Instruct-Q4_K_M.gguf"
 LLM_CONTEXT_SIZE = 8192
 LLM_MAX_TOKENS = 512
 LLM_TEMPERATURE = 0.1
 
 # --- NER (GLiNER zero-shot, HuggingFace id) ---
-NER_MODEL_NAME = os.environ.get("CIBOBUONO_NER_MODEL", "urchade/gliner_multi-v2.1")
+# gliner_large-v2.1 offers significantly better zero-shot performance than multi-v2.1.
+NER_MODEL_NAME = os.environ.get("CIBOBUONO_NER_MODEL", "urchade/gliner_large-v2.1")
 
 # --- Video cleanup ---
 MAX_CACHED_VIDEOS = 20  # Delete oldest videos when cache exceeds this
@@ -235,4 +243,67 @@ def detect_hardware() -> dict:
         "cpu_count": cpu_count,
         "total_ram_gb": round(total_ram_gb, 1),
         "is_apple_silicon": is_apple_silicon,
+    }
+
+
+def select_optimal_models(hw: dict | None = None) -> dict:
+    """
+    Select the best available models based on hardware and what's already downloaded.
+
+    LLM tiers (RAM-based, GGUF in models/):
+      ≥40 GB → prefer 70B Q3 (fits with headroom)
+      ≥24 GB → prefer 32B Q4  (~20 GB)
+      ≥16 GB → prefer 14B Q4  (~9 GB)
+       <16 GB → use 8B Q4     (~5 GB)
+
+    Whisper tiers:
+      Apple Silicon or ≥8 GB → large-v3-turbo (best quality/speed)
+      <8 GB CPU-only         → medium
+
+    NER: always gliner_large-v2.1 when available, multi-v2.1 as fallback.
+    """
+    if hw is None:
+        hw = detect_hardware()
+
+    ram = hw.get("total_ram_gb", 8)
+    is_apple = hw.get("is_apple_silicon", False)
+
+    # ── Whisper ──────────────────────────────────────────────────────────────
+    if is_apple or ram >= 8:
+        whisper_model = "large-v3-turbo"
+    else:
+        whisper_model = "medium"
+
+    # ── LLM (check what's actually present in models/) ───────────────────────
+    # Priority list: (filename_fragment, min_ram_gb)
+    llm_candidates = [
+        ("70B", 40),
+        ("32B", 24),
+        ("14B", 16),
+        ("8B",   0),
+    ]
+
+    llm_model: Optional[Path] = None
+    llm_tier = "8B"
+    for fragment, min_ram in llm_candidates:
+        if ram < min_ram:
+            continue
+        matches = sorted(MODELS_DIR.glob(f"*{fragment}*.gguf"))
+        if matches:
+            llm_model = matches[0]
+            llm_tier = fragment
+            break
+
+    # Fall back to any GGUF if none of the above matched
+    if llm_model is None:
+        all_ggufs = sorted(MODELS_DIR.glob("*.gguf"))
+        if all_ggufs:
+            llm_model = all_ggufs[0]
+            llm_tier = "unknown"
+
+    return {
+        "whisper_model": whisper_model,
+        "llm_model_path": llm_model,
+        "llm_tier": llm_tier,
+        "hw": hw,
     }

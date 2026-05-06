@@ -1,5 +1,7 @@
 """Tests for visit_classifier deterministic rules."""
 
+__author__ = "Luca Ostinelli"
+
 from scripts.ner_candidates import Candidate
 from scripts.visit_classifier import classify_visit_rules, get_transcript_window
 
