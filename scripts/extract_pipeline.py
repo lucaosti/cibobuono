@@ -35,27 +35,24 @@ if TYPE_CHECKING:
 
 logger = setup_logging("extract_pipeline")
 
-DETAIL_PROMPT = """<|start_header_id|>system<|end_header_id|>
+_DETAIL_SYSTEM = (
+    "You extract structured fields for ONE food venue from an Italian vlog excerpt. "
+    "Return ONLY JSON."
+)
 
-You extract structured fields for ONE food venue from an Italian vlog excerpt. Return ONLY JSON.<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-VIDEO TITLE: "{title}"
-PLACE: "{place}"
-
-EXCERPT:
-"{window}"
-
-Return one JSON object:
-{{"rating": null or blogger overall grade as string (e.g. "8", "8--", "6++"),
- "sentiment": "positive" | "neutral" | "negative",
- "notes": "foods tried, prices, short factual observations",
- "category": ["pizzeria"] ,
- "city": "",
- "address": ""}}
-
-Use null/empty if unknown. Italian only in notes.<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-"""
+_DETAIL_USER_TEMPLATE = (
+    'VIDEO TITLE: "{title}"\n'
+    'PLACE: "{place}"\n\n'
+    'EXCERPT:\n"{window}"\n\n'
+    "Return one JSON object:\n"
+    '{{"rating": null or blogger overall grade as string (e.g. "8", "8--", "6++"),\n'
+    ' "sentiment": "positive" | "neutral" | "negative",\n'
+    ' "notes": "foods tried, prices, short factual observations",\n'
+    ' "category": ["pizzeria"],\n'
+    ' "city": "",\n'
+    ' "address": ""}}\n\n'
+    "Use null/empty if unknown. Italian only in notes."
+)
 
 
 def _normalize_name(name: str) -> str:
@@ -135,19 +132,22 @@ def _detail_llm(
     place: str,
     video_title: str,
 ) -> dict:
-    prompt = DETAIL_PROMPT.format(
+    user_msg = _DETAIL_USER_TEMPLATE.format(
         title=(video_title or "")[:200].replace('"', "'"),
         place=place.replace('"', "'")[:120],
         window=(window[:2800]).replace('"', "'"),
     )
     try:
-        response = llm(
-            prompt,
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": _DETAIL_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
             max_tokens=min(400, LLM_MAX_TOKENS),
             temperature=LLM_TEMPERATURE,
             stop=["```", "\n\n\n"],
         )
-        out = response["choices"][0]["text"].strip()
+        out = response["choices"][0]["message"]["content"].strip()
         data = _parse_detail_json(out)
         return data or {}
     except Exception as e:
@@ -180,7 +180,8 @@ def extract_from_video(
         transcript: full Whisper transcript (segments); improves time windows. Optional.
         youtube_extra: retained for API compatibility (chapters may inform future work).
     """
-    _ = youtube_extra  # reserved
+    # youtube_extra carries description_timestamps and chapters already processed
+    # by run_pipeline into video_intel.venue_hints — nothing more to do here.
     channel_rubriche = channel_rubriche or []
     llm = get_llm()
 

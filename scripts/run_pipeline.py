@@ -406,6 +406,7 @@ def run_pipeline(
                     from scripts.video_intelligence import (
                         analyze_title,
                         analyze_description,
+                        analyze_description_timestamps,
                         analyze_chapters,
                         parse_description_timestamps,
                     )
@@ -432,6 +433,7 @@ def run_pipeline(
                     # ── Title/description/chapter intelligence ──────────
                     video_intel = analyze_title(v_title)
                     video_intel = analyze_description(video_description or "", video_intel)
+                    video_intel = analyze_description_timestamps(dts, video_intel)
                     video_intel = analyze_chapters(chapters, video_intel)
 
                     # Title-based skip for non-review videos

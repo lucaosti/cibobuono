@@ -51,7 +51,7 @@ def test_pipeline_single_chunk_protected_keeps_visit():
         '{"rating": "8", "sentiment": "positive", '
         '"notes": "maritozzo", "category": ["pasticceria"], "city": "Roma", "address": ""}'
     )
-    mock_llm.return_value = {"choices": [{"text": detail_json}]}
+    mock_llm.create_chat_completion.return_value = {"choices": [{"message": {"content": detail_json}}]}
 
     with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
         with patch("scripts.extract_pipeline.get_llm", return_value=mock_llm):

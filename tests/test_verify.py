@@ -61,11 +61,11 @@ class TestFindBestMatch:
         assert match is None
 
     def test_fuzzy_transcription_error(self):
-        """Whisper might garble names; fuzzy should still match."""
+        """Whisper ASR garbles 'Spaziale' → 'Spazale'; fuzzy should still match."""
         places = [self._make_place("Vittoria Spaziale")]
-        match = _find_best_match("Vittoria Spaziale", places)
+        match = _find_best_match("Vittoria Spazale", places)
         assert match is not None
-        assert match["_match_score"] >= 90
+        assert match["_match_score"] >= 80
 
     def test_token_order_invariant(self):
         """token_sort_ratio handles word reordering."""

@@ -150,8 +150,8 @@ class TestIsFoodReviewVideo:
     def _mock_llm_response(self, answer: str):
         """Create a mock LLM that returns the given answer."""
         mock_llm = MagicMock()
-        mock_llm.return_value = {
-            "choices": [{"text": answer}]
+        mock_llm.create_chat_completion.return_value = {
+            "choices": [{"message": {"content": answer}}]
         }
         return mock_llm
 
@@ -224,7 +224,7 @@ class TestIsFoodReviewVideo:
     @patch("scripts.extract_locales.get_llm")
     def test_llm_exception_defaults_to_true(self, mock_get_llm):
         mock_llm = MagicMock()
-        mock_llm.side_effect = RuntimeError("LLM crashed")
+        mock_llm.create_chat_completion.side_effect = RuntimeError("LLM crashed")
         mock_get_llm.return_value = mock_llm
         is_food, reason = is_food_review_video(
             "Un video", "un testo qualsiasi per il test"

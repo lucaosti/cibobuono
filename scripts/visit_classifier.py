@@ -56,24 +56,21 @@ PRICE_RATING_PAT = re.compile(
     re.I,
 )
 
-LLM_VISIT_PROMPT = """<|start_header_id|>system<|end_header_id|>
+_VISIT_SYSTEM = (
+    "You decide if an Italian food vlog excerpt shows the host PHYSICALLY at the named place "
+    "(eating, ordering, on location). Answer ONLY JSON."
+)
 
-You decide if an Italian food vlog excerpt shows the host PHYSICALLY at the named place (eating, ordering, on location). Answer ONLY JSON.<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-PLACE NAME: "{name}"
-
-EXCERPT:
-"{window}"
-
-Return exactly one JSON object, no markdown:
-{{"visit": true or false, "evidence": "short quote copied from excerpt (max 25 words)"}}
-
-Rules:
-- visit=true only if they are clearly on-site at that business in this excerpt.
-- visit=false for comparisons, jokes, future plans, or name-dropping only.
-- evidence must be a substring of EXCERPT (or empty if visit=false).<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-"""
+_VISIT_USER_TEMPLATE = (
+    'PLACE NAME: "{name}"\n\n'
+    'EXCERPT:\n"{window}"\n\n'
+    "Return exactly one JSON object, no markdown:\n"
+    '{{"visit": true or false, "evidence": "short quote copied from excerpt (max 25 words)"}}\n\n'
+    "Rules:\n"
+    "- visit=true only if they are clearly on-site at that business in this excerpt.\n"
+    "- visit=false for comparisons, jokes, future plans, or name-dropping only.\n"
+    "- evidence must be a substring of EXCERPT (or empty if visit=false)."
+)
 
 
 def get_transcript_window(
@@ -185,18 +182,21 @@ def classify_with_llm(
     candidate: "Candidate",
 ) -> tuple[bool, str, float]:
     """LLM arbiter. Returns (visit, evidence, confidence)."""
-    prompt = LLM_VISIT_PROMPT.format(
+    user_msg = _VISIT_USER_TEMPLATE.format(
         name=candidate.name.replace('"', "'")[:120],
         window=(window_text[:2500]).replace('"', "'"),
     )
     try:
-        response = llm(
-            prompt,
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": _VISIT_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
             max_tokens=min(180, LLM_MAX_TOKENS),
             temperature=LLM_TEMPERATURE,
             stop=["```", "\n\n\n"],
         )
-        out = response["choices"][0]["text"].strip()
+        out = response["choices"][0]["message"]["content"].strip()
         data = _parse_llm_visit_json(out)
         if data is None:
             return False, "", 0.45

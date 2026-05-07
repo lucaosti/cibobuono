@@ -47,17 +47,27 @@ DEDUP_DISTANCE_METERS = 200
 DEDUP_NAME_SIMILARITY_THRESHOLD = 70  # thefuzz score 0-100
 
 # --- LLM settings ---
-# Recommended: Qwen2.5-32B-Instruct-Q4_K_M.gguf (~20 GB, fits in 32 GB unified memory)
-# or Llama-3.3-70B-Instruct-Q2_K.gguf (~22 GB) for best Italian understanding.
-# Current 8B fallback: Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+# All prompts use create_chat_completion (model-agnostic format via GGUF chat template).
+#
+# 32 GB Apple Silicon:
+#   Primary:  Qwen2.5-32B-Instruct-Q4_K_M.gguf   (~20 GB, strong Italian)
+#   Upgrade:  gemma-3-27b-it-Q4_K_M.gguf          (~16 GB, 140+ languages, more headroom)
+#   Italian:  Velvet-14B-Q4_K_M.gguf              (~9 GB, 23% Italian training data)
+#   Fallback: Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf (~5 GB)
+#
+# 64 GB Apple Silicon:
+#   Primary:  Qwen2.5-72B-Instruct-Q4_K_M.gguf   (~43 GB, best open multilingual)
+#   Alt:      Llama-3.3-70B-Instruct-Q4_K_M.gguf (~40 GB)
 LLM_MODEL_FILENAME = "Qwen2.5-32B-Instruct-Q4_K_M.gguf"
 LLM_CONTEXT_SIZE = 8192
 LLM_MAX_TOKENS = 512
 LLM_TEMPERATURE = 0.1
 
 # --- NER (GLiNER zero-shot, HuggingFace id) ---
-# gliner_large-v2.1 offers significantly better zero-shot performance than multi-v2.1.
-NER_MODEL_NAME = os.environ.get("CIBOBUONO_NER_MODEL", "urchade/gliner_large-v2.1")
+# gliner-x-large-v0.5: MT5-backbone, explicit Italian support, replaces gliner_large-v2.1.
+# SLIMER-IT (expertai/LLaMAntino-3-SLIMER-IT) offers higher accuracy but requires
+# LLM-class inference; use gliner-x-large-v0.5 for batch processing.
+NER_MODEL_NAME = os.environ.get("CIBOBUONO_NER_MODEL", "knowledgator/gliner-x-large-v0.5")
 
 # --- Video cleanup ---
 MAX_CACHED_VIDEOS = 20  # Delete oldest videos when cache exceeds this
@@ -251,16 +261,16 @@ def select_optimal_models(hw: dict | None = None) -> dict:
     Select the best available models based on hardware and what's already downloaded.
 
     LLM tiers (RAM-based, GGUF in models/):
-      ≥40 GB → prefer 70B Q3 (fits with headroom)
-      ≥24 GB → prefer 32B Q4  (~20 GB)
-      ≥16 GB → prefer 14B Q4  (~9 GB)
-       <16 GB → use 8B Q4     (~5 GB)
+      ≥40 GB → prefer 72B or 70B Q4  (Qwen2.5-72B or Llama-3.3-70B)
+      ≥24 GB → prefer 32B or 27B Q4  (Qwen2.5-32B or Gemma-3-27B)
+      ≥16 GB → prefer 14B Q4         (Velvet-14B or similar)
+       <16 GB → use 8B Q4            (Llama-3.1-8B or similar)
 
     Whisper tiers:
-      Apple Silicon or ≥8 GB → large-v3-turbo (best quality/speed)
+      Apple Silicon or ≥8 GB → large-v3 (full, best proper noun accuracy)
       <8 GB CPU-only         → medium
 
-    NER: always gliner_large-v2.1 when available, multi-v2.1 as fallback.
+    NER: gliner-x-large-v0.5 (default); overridable via CIBOBUONO_NER_MODEL.
     """
     if hw is None:
         hw = detect_hardware()
@@ -269,17 +279,23 @@ def select_optimal_models(hw: dict | None = None) -> dict:
     is_apple = hw.get("is_apple_silicon", False)
 
     # ── Whisper ──────────────────────────────────────────────────────────────
+    # large-v3 (full, 32 decoder layers) is preferred over large-v3-turbo for
+    # Italian proper nouns (restaurant names, addresses). Speed penalty on
+    # Apple Silicon Metal is modest.
     if is_apple or ram >= 8:
-        whisper_model = "large-v3-turbo"
+        whisper_model = "large-v3"
     else:
         whisper_model = "medium"
 
     # ── LLM (check what's actually present in models/) ───────────────────────
     # Priority list: (filename_fragment, min_ram_gb)
+    # "72B" catches Qwen2.5-72B; "70B" catches Llama-3.3-70B; "27B" catches Gemma-3-27B.
     llm_candidates = [
+        ("72B", 40),
         ("70B", 40),
         ("32B", 24),
-        ("14B", 16),
+        ("27B", 20),
+        ("14B", 12),
         ("8B",   0),
     ]
 

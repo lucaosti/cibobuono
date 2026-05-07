@@ -95,27 +95,27 @@ def get_llm():
 # Food-relevance gate — lightweight LLM check before extraction
 # ---------------------------------------------------------------------------
 
-FOOD_RELEVANCE_PROMPT = """<|start_header_id|>system<|end_header_id|>
+_FOOD_SYSTEM = (
+    "You classify Italian YouTube videos. "
+    "Answer SI or NO — is the video about physically visiting food venues?"
+)
 
-You classify Italian YouTube videos. Answer SI or NO — is the video about physically visiting food venues?<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-VIDEO TITLE: "{title}"
-{description_section}
-TRANSCRIPT EXCERPT (first minutes):
-"{transcript_sample}"
-
-RULES:
-- SI = the blogger clearly goes to named food businesses (restaurant, bakery, street stall, etc.) and eats/tastes there in the video.
-- NO = sports, boxing, gaming, interviews, activism, recipe-only at home, generic vlogs without venue visits, or only talking about food without being on location.
-- "Cena a 4 mani" or similar = private dinner event, NOT a venue review → NO
-- "Salviamo il X" = activism video → NO
-- Titles with "criminale" (e.g., "CITY criminale", "Forni criminali CITY") = food review → SI
-- Titles with "Hit di Franchino:" = single venue food review → SI
-- When in doubt → NO (prefer skipping borderline videos)
-
-Answer with EXACTLY one word: SI or NO<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-"""
+_FOOD_USER_TEMPLATE = (
+    'VIDEO TITLE: "{title}"\n'
+    "{description_section}"
+    'TRANSCRIPT EXCERPT (first minutes):\n"{transcript_sample}"\n\n'
+    "RULES:\n"
+    "- SI = the blogger clearly goes to named food businesses (restaurant, bakery, "
+    "street stall, etc.) and eats/tastes there in the video.\n"
+    "- NO = sports, boxing, gaming, interviews, activism, recipe-only at home, "
+    "generic vlogs without venue visits, or only talking about food without being on location.\n"
+    '- "Cena a 4 mani" or similar = private dinner event, NOT a venue review → NO\n'
+    '- "Salviamo il X" = activism video → NO\n'
+    '- Titles with "criminale" (e.g., "CITY criminale", "Forni criminali CITY") = food review → SI\n'
+    '- Titles with "Hit di Franchino:" = single venue food review → SI\n'
+    "- When in doubt → NO (prefer skipping borderline videos)\n\n"
+    "Answer with EXACTLY one word: SI or NO"
+)
 
 
 def is_food_review_video(
@@ -135,22 +135,25 @@ def is_food_review_video(
     description_section = ""
     if video_description:
         desc_trunc = video_description[:500]
-        description_section = f'\nDESCRIPTION: "{desc_trunc}"\n'
+        description_section = f'DESCRIPTION: "{desc_trunc}"\n'
 
-    prompt = FOOD_RELEVANCE_PROMPT.format(
-        title=title[:200],
-        transcript_sample=sample,
+    user_msg = _FOOD_USER_TEMPLATE.format(
+        title=title[:200].replace('"', "'"),
+        transcript_sample=sample.replace('"', "'"),
         description_section=description_section,
     )
 
     try:
-        response = llm(
-            prompt,
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": _FOOD_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
             max_tokens=20,
             temperature=0.05,
             stop=["\n"],
         )
-        answer = response["choices"][0]["text"].strip().upper()
+        answer = response["choices"][0]["message"]["content"].strip().upper()
         first_token = re.split(r"[\s.,;:!?]+", answer, maxsplit=1)[0]
         is_yes = first_token in ("SI", "SÌ", "SÍ")
 

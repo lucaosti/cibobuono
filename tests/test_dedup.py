@@ -185,17 +185,18 @@ class TestMergeLocale:
         assert "ristorante" in result["category"]
 
     def test_equivalent_names_not_aliased(self):
-        """Names that normalize to the same core should not produce aliases."""
+        """Names with fuzz.ratio >= 90 are treated as same display name — not aliased."""
         existing = {
             "name": "Forno Rossi",
             "aliases": [],
             "category": ["forno"],
         }
         new_data = {
-            "name": "Panificio Rossi",
+            "name": "Forni Rossi",  # fuzz.ratio("forno rossi", "forni rossi") ≈ 95
             "category": ["panificio"],
         }
         result = merge_locale(existing, new_data)
+        assert "Forni Rossi" not in result["aliases"]
         assert "panificio" in result["category"]
 
     def test_no_duplicate_alias(self):

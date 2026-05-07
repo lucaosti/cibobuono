@@ -238,6 +238,62 @@ def _is_chapter_venue_name(title: str) -> bool:
     return True
 
 
+def analyze_description_timestamps(
+    dts: list[dict],
+    intel: VideoIntel,
+) -> VideoIntel:
+    """
+    Enrich VideoIntel with venue hints from description timestamp lines.
+
+    Italian food creators often list visited venues as timestamped chapters in the
+    video description (e.g. "1:30 Da Remo Roma").  These are high-signal hints —
+    confidence is set to "high" (one step below chapters' "very_high" because the
+    format is less structured and creators sometimes use generic labels).
+
+    This processes the output of parse_description_timestamps() and should be called
+    BEFORE analyze_chapters so that manually-set chapters can upgrade confidence.
+    """
+    if not dts:
+        return intel
+
+    from scripts.schemas import timestamp_to_seconds
+
+    existing_names = {h["name"].lower() for h in intel.venue_hints}
+    added = 0
+    for entry in dts:
+        raw = (entry.get("label") or "").strip()
+        if not raw or not _is_chapter_venue_name(raw):
+            continue
+        if raw.lower() in existing_names:
+            continue
+
+        ts_str = entry.get("timestamp", "")
+        try:
+            start_seconds = float(timestamp_to_seconds(ts_str))
+        except (ValueError, TypeError):
+            start_seconds = None
+
+        hint: dict = {
+            "name": raw,
+            "source": "description_timestamp",
+            "confidence": "high",
+        }
+        if start_seconds is not None:
+            hint["start_time"] = start_seconds
+
+        intel.venue_hints.append(hint)
+        existing_names.add(raw.lower())
+        added += 1
+        logger.info(f"Description timestamp → venue hint: '{raw}' (t={ts_str})")
+
+    if added:
+        if intel.video_type == "unknown":
+            intel.video_type = "multi_venue_tour"
+        logger.info(f"Description timestamps: {added} venue hints added")
+
+    return intel
+
+
 def analyze_chapters(chapters: list[dict], intel: VideoIntel) -> VideoIntel:
     """
     Enrich VideoIntel with venue hints from YouTube chapter titles.

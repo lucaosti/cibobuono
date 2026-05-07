@@ -52,20 +52,16 @@ class TestGenerateLocaleId:
         assert id1 != id2
 
     def test_coordinate_rounding(self):
-        """Coordinates are rounded to 4 decimals."""
+        """Coordinates rounded to 4 decimals: 41.89123→41.8912, 12.49215→12.4922."""
         id1 = generate_locale_id("Test", 41.89123, 12.49215)
         id2 = generate_locale_id("Test", 41.8912, 12.4922)
-        # Both should round to 41.8912 and 12.4922 / 41.8912 and 12.4921
-        # They differ slightly so IDs should differ
-        # But functionally, very close coordinates produce similar but deterministic IDs
+        assert id1 == id2
 
     def test_whitespace_normalized(self):
-        """Extra whitespace is normalized."""
+        """Multiple spaces collapse to a single separator — same ID as single space."""
         id1 = generate_locale_id("Forno  Rossi", 41.8912, 12.4921)
         id2 = generate_locale_id("Forno Rossi", 41.8912, 12.4921)
-        # Multiple spaces become single underscore
-        # This should actually produce different results in current implementation
-        # because re.sub(r'\s+', '_', ...) normalizes multiple spaces to one underscore
+        assert id1 == id2
 
 
 class TestGenerateVisitId:

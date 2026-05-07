@@ -72,10 +72,13 @@ class TestChunkTranscription:
         assert chunks[0]["video_id"] == "test_video"
 
     def test_multi_chunk(self):
-        """5-minute video with 90s chunks produces multiple chunks."""
+        """5-minute video with 90s chunks/15s overlap produces exactly 4 chunks.
+
+        step=75s → starts at 0, 75, 150, 225 → 4 chunks covering full 300s.
+        """
         transcript = self._make_transcript(300)
         chunks = chunk_transcription(transcript, chunk_duration=90, overlap=15)
-        assert len(chunks) >= 3
+        assert len(chunks) == 4
 
     def test_chunk_has_required_fields(self):
         transcript = self._make_transcript(100)
