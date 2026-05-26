@@ -12,12 +12,12 @@ __author__ = "Luca Ostinelli"
 import json
 import re
 
+from scripts.hardware import get_profile
 from scripts.utils import (
     CACHE_DIR,
     LLM_CONTEXT_SIZE,
     LLM_MAX_TOKENS,
     LLM_TEMPERATURE,
-    detect_hardware,
     resolve_llm_model_path,
     setup_logging,
 )
@@ -29,10 +29,25 @@ _llm_instance = None
 
 
 def get_llm():
-    """Load and cache the LLM model with hardware-optimal settings."""
+    """Load and cache the LLM model with hardware-optimal settings.
+
+    Returns ``None`` (without errors) when the detected hardware profile has
+    ``enable_llm=False`` — typically a Raspberry Pi Zero / Pi 3 / very small VM.
+    Callers (``is_food_review_video``, ``visit_classifier.classify_candidate``)
+    handle a None return gracefully and degrade to NER+rules-only extraction.
+    """
     global _llm_instance
     if _llm_instance is not None:
         return _llm_instance
+
+    profile = get_profile()
+    if not profile.enable_llm:
+        logger.warning(
+            "LLM disabled: hardware profile %s (%.1f GB RAM) is below the LLM "
+            "threshold. Running NER+rules-only extraction.",
+            profile.platform.value, profile.total_ram_gb,
+        )
+        return None
 
     try:
         from llama_cpp import Llama
@@ -51,26 +66,34 @@ def get_llm():
         )
         return None
 
-    hw = detect_hardware()
+    # Honor the project-wide LLM_CONTEXT_SIZE when the profile allows a larger
+    # context than the default; otherwise clamp down (Pi-class hardware).
+    n_ctx = min(LLM_CONTEXT_SIZE, profile.n_ctx) if profile.n_ctx else LLM_CONTEXT_SIZE
     logger.info(f"Loading LLM model: {model_path.name}")
     logger.info(
-        f"  Hardware config: threads={hw['n_threads']}, "
-        f"gpu_layers={hw['n_gpu_layers']}, batch={hw['n_batch']}, "
-        f"mlock={hw['use_mlock']}, apple_silicon={hw['is_apple_silicon']}"
+        "  Hardware config: platform=%s, threads=%d, gpu_layers=%d, batch=%d, "
+        "ctx=%d, mlock=%s, metal=%s, cuda=%s",
+        profile.platform.value, profile.n_threads, profile.n_gpu_layers,
+        profile.n_batch, n_ctx, profile.use_mlock, profile.has_metal,
+        profile.has_cuda,
     )
 
-    llm_kwargs = {
+    llm_kwargs: dict = {
         "model_path": str(model_path),
-        "n_ctx": LLM_CONTEXT_SIZE,
-        "n_gpu_layers": hw["n_gpu_layers"],
-        "n_threads": hw["n_threads"],
-        "n_batch": hw["n_batch"],
-        "use_mlock": hw["use_mlock"],
+        "n_ctx": n_ctx,
+        "n_gpu_layers": profile.n_gpu_layers,
+        "n_threads": profile.n_threads,
+        "n_batch": profile.n_batch,
+        "use_mlock": profile.use_mlock,
+        "use_mmap": profile.use_mmap,
         "verbose": False,
     }
 
-    if hw["is_apple_silicon"]:
-        extra_kwargs: dict = {}
+    # Flash Attention + quantized KV cache are well-tested on the Metal
+    # backend; on CUDA they're also supported but more recent. Limit to Metal
+    # for now to avoid surprises on older NVIDIA drivers.
+    extra_kwargs: dict = {}
+    if profile.has_metal:
         extra_kwargs["flash_attn"] = True
         try:
             from llama_cpp import GGML_TYPE_Q8_0
@@ -78,6 +101,8 @@ def get_llm():
             extra_kwargs["type_v"] = GGML_TYPE_Q8_0
         except ImportError:
             pass
+
+    if extra_kwargs:
         try:
             _llm_instance = Llama(**llm_kwargs, **extra_kwargs)
             logger.info("LLM loaded with flash attention + quantized KV cache (Metal)")

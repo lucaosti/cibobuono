@@ -1,36 +1,48 @@
 import { useState } from "react";
 import type { LocaleWithVisits } from "../types";
 import { GITHUB_REPO } from "../types";
+import { useT } from "../i18n/useLanguage";
+import type { Messages } from "../i18n/messages";
 
-const SENTIMENT_LABEL: Record<string, string> = {
-  positive: "Positive",
-  neutral: "Neutral",
-  negative: "Negative",
-};
+function sentimentLabel(t: Messages, sentiment: string): string {
+  switch (sentiment) {
+    case "positive":
+      return t.sentimentPositive;
+    case "negative":
+      return t.sentimentNegative;
+    default:
+      return t.sentimentNeutral;
+  }
+}
 
 function buildIssueUrl(
+  t: Messages,
   locale: LocaleWithVisits,
   action: "hide" | "edit",
   editData?: { name?: string; city?: string; notes?: string },
 ): string {
   const title =
     action === "hide"
-      ? `[Correction] Remove: ${locale.name}`
-      : `[Correction] Edit: ${locale.name}`;
+      ? t.issueRemoveTitle(locale.name)
+      : t.issueEditTitle(locale.name);
 
   let body: string;
   if (action === "hide") {
     body = [
-      "## Correction: Remove false positive",
+      t.issueRemoveHeader,
       "",
-      `**Locale ID:** \`${locale.locale_id}\``,
-      `**Current name:** ${locale.name}`,
-      `**City:** ${locale.city}`,
+      `${t.issueFieldLocaleId} \`${locale.locale_id}\``,
+      `${t.issueFieldCurrentName} ${locale.name}`,
+      `${t.issueFieldCity} ${locale.city}`,
       "",
-      "### corrections.json entry",
+      t.issueCorrectionEntryHeader,
       "```json",
       JSON.stringify(
-        { locale_id: locale.locale_id, type: "hide", reason: "False positive — not actually visited" },
+        {
+          locale_id: locale.locale_id,
+          type: "hide",
+          reason: t.issueReasonFalsePositive,
+        },
         null,
         2,
       ),
@@ -41,14 +53,14 @@ function buildIssueUrl(
     if (editData?.name) overrides.name = editData.name;
     if (editData?.city) overrides.city = editData.city;
     body = [
-      "## Correction: Edit locale",
+      t.issueEditHeader,
       "",
-      `**Locale ID:** \`${locale.locale_id}\``,
-      `**Current name:** ${locale.name}`,
-      `**City:** ${locale.city}`,
-      editData?.notes ? `**Notes:** ${editData.notes}` : "",
+      `${t.issueFieldLocaleId} \`${locale.locale_id}\``,
+      `${t.issueFieldCurrentName} ${locale.name}`,
+      `${t.issueFieldCity} ${locale.city}`,
+      editData?.notes ? `${t.issueFieldNotes} ${editData.notes}` : "",
       "",
-      "### corrections.json entry",
+      t.issueCorrectionEntryHeader,
       "```json",
       JSON.stringify(
         { locale_id: locale.locale_id, type: "edit", overrides },
@@ -73,6 +85,7 @@ interface EditFormProps {
 }
 
 function EditForm({ locale, onClose }: EditFormProps) {
+  const t = useT();
   const [name, setName] = useState(locale.name);
   const [city, setCity] = useState(locale.city);
   const [notes, setNotes] = useState("");
@@ -80,43 +93,45 @@ function EditForm({ locale, onClose }: EditFormProps) {
   return (
     <div className="edit-form" onClick={(e) => e.stopPropagation()}>
       <div className="edit-form-header">
-        <strong>Suggest correction</strong>
-        <button className="edit-close" onClick={onClose}>&times;</button>
+        <strong>{t.suggestCorrection}</strong>
+        <button className="edit-close" onClick={onClose}>
+          &times;
+        </button>
       </div>
 
       <label>
-        Name
+        {t.fieldName}
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </label>
       <label>
-        City
+        {t.fieldCity}
         <input value={city} onChange={(e) => setCity(e.target.value)} />
       </label>
       <label>
-        Notes
+        {t.fieldNotes}
         <input
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
-          placeholder="What's wrong?"
+          placeholder={t.notesPlaceholder}
         />
       </label>
 
       <div className="edit-actions">
         <a
-          href={buildIssueUrl(locale, "edit", { name, city, notes })}
+          href={buildIssueUrl(t, locale, "edit", { name, city, notes })}
           target="_blank"
           rel="noopener noreferrer"
           className="btn btn-primary"
         >
-          Submit edit
+          {t.submitEdit}
         </a>
         <a
-          href={buildIssueUrl(locale, "hide")}
+          href={buildIssueUrl(t, locale, "hide")}
           target="_blank"
           rel="noopener noreferrer"
           className="btn btn-danger"
         >
-          Report false positive
+          {t.reportFalsePositive}
         </a>
       </div>
     </div>
@@ -130,13 +145,14 @@ interface Props {
 }
 
 export default function LocaleList({ locales, selected, onSelect }: Props) {
+  const t = useT();
   const [editing, setEditing] = useState<string | null>(null);
 
   if (locales.length === 0) {
     return (
       <div className="locale-list-empty">
-        <p>No venues found.</p>
-        <p className="hint">The pipeline hasn't extracted any locales yet.</p>
+        <p>{t.noVenuesFound}</p>
+        <p className="hint">{t.noVenuesHint}</p>
       </div>
     );
   }
@@ -155,10 +171,12 @@ export default function LocaleList({ locales, selected, onSelect }: Props) {
               <h3>{loc.name}</h3>
               <div className="locale-badges">
                 {loc.avgRating != null && (
-                  <span className="rating-badge">{loc.avgRating}/10</span>
+                  <span className="rating-badge">
+                    {t.ratingOutOf10(loc.avgRating)}
+                  </span>
                 )}
                 <span className={`sentiment-badge ${loc.dominantSentiment}`}>
-                  {SENTIMENT_LABEL[loc.dominantSentiment]}
+                  {sentimentLabel(t, loc.dominantSentiment)}
                 </span>
               </div>
             </div>
@@ -167,12 +185,10 @@ export default function LocaleList({ locales, selected, onSelect }: Props) {
 
             <div className="locale-meta">
               <span className="visits-count">
-                {loc.visits.length} video{loc.visits.length !== 1 ? "s" : ""}
+                {t.videosCount(loc.visits.length)}
               </span>
               {loc.category.length > 0 && (
-                <span className="categories">
-                  {loc.category.join(", ")}
-                </span>
+                <span className="categories">{loc.category.join(", ")}</span>
               )}
             </div>
 
@@ -187,17 +203,19 @@ export default function LocaleList({ locales, selected, onSelect }: Props) {
                       className="btn btn-maps"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      Google Maps
+                      {t.googleMaps}
                     </a>
                   )}
                   <button
                     className="btn btn-edit"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setEditing(editing === loc.locale_id ? null : loc.locale_id);
+                      setEditing(
+                        editing === loc.locale_id ? null : loc.locale_id,
+                      );
                     }}
                   >
-                    {editing === loc.locale_id ? "Cancel" : "Edit"}
+                    {editing === loc.locale_id ? t.cancel : t.edit}
                   </button>
                 </div>
 
@@ -216,19 +234,20 @@ export default function LocaleList({ locales, selected, onSelect }: Props) {
                         onClick={(e) => e.stopPropagation()}
                       >
                         <span className={`visit-sentiment ${v.sentiment}`}>
-                          {SENTIMENT_LABEL[v.sentiment]?.[0]}
+                          {sentimentLabel(t, v.sentiment).charAt(0)}
                         </span>
                         <span className="visit-info">
                           {v.timestamp_start} &mdash; {v.date}
                           {v.rating && (
-                            <span className="visit-rating"> {v.rating}/10</span>
+                            <span className="visit-rating">
+                              {" "}
+                              {t.ratingOutOf10(v.rating)}
+                            </span>
                           )}
                         </span>
                         <span className="visit-arrow">&#9654;</span>
                       </a>
-                      {v.notes && (
-                        <p className="visit-notes">{v.notes}</p>
-                      )}
+                      {v.notes && <p className="visit-notes">{v.notes}</p>}
                     </div>
                   ))}
                 </div>

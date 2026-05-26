@@ -13,7 +13,7 @@ Two-phase design:
       For each pending video (newest first, limited by --max-videos):
       3. Prefetch audio (sliding window of 20 files)
       4. Download audio via yt-dlp
-      5. Transcribe: YouTube subtitles first, Whisper large-v3-turbo fallback
+      5. Transcribe: Whisper large-v3-turbo (primary) + YouTube manual subs (when present)
       6. Chunk transcription (90s chunks, 15s overlap)
       6b. Food-relevance gate (LLM classifies: is this a food review video?)
       7. Extract locales with local LLM (GGUF, auto-selected by RAM + video description)
@@ -39,12 +39,19 @@ __author__ = "Luca Ostinelli"
 import argparse
 import json
 import signal
+import sys
 from datetime import datetime, timezone
 
+from scripts.chunk_transcription import seconds_to_timestamp as _stt
+from scripts.dashboard import Dashboard
+from scripts.hardware import get_profile
+from scripts.schemas import VideoStatus
 from scripts.utils import (
     CACHE_DIR,
     CHANNELS_JSON,
     CORRECTIONS_JSON,
+    DATA_DIR,
+    FLAGGED_SEGMENTS_JSON,
     LOCALES_JSON,
     LOGS_DIR,
     PREFETCH_WINDOW,
@@ -52,7 +59,9 @@ from scripts.utils import (
     SKIPPED_VIDEOS_JSON,
     VIDEOS_JSON,
     VISITS_JSON,
-    FLAGGED_SEGMENTS_JSON,
+    WATCH_MIN_INTERVAL_SECONDS,
+    WATCH_POLL_INTERVAL_SECONDS,
+    WHISPER_DEFAULT_MODEL,
     cleanup_cache,
     ensure_dirs,
     load_json,
@@ -60,8 +69,6 @@ from scripts.utils import (
     setup_logging,
     today_str,
 )
-from scripts.schemas import VideoStatus
-from scripts.dashboard import Dashboard
 
 logger = setup_logging("pipeline")
 
@@ -111,13 +118,14 @@ def run_pipeline(
     skip_transcribe: bool = False,
     skip_extract: bool = False,
     skip_push: bool = False,
-    whisper_model: str = "large-v3-turbo",
+    whisper_model: str = WHISPER_DEFAULT_MODEL,
     max_videos: int = 100,
     no_dashboard: bool = False,
     auto_models: bool = True,
+    _external_setup: bool = False,
 ):
     """
-    Run the full pipeline.
+    Run the full pipeline (one shot).
 
     Args:
         skip_fetch: Skip cataloging new videos (work only on existing pending)
@@ -127,21 +135,38 @@ def run_pipeline(
         whisper_model: Whisper model size (tiny, base, small, medium, large)
         max_videos: Max pending videos to process in this run (0 = all pending)
         no_dashboard: Disable live dashboard (log-only mode)
+        _external_setup: Internal flag; True when invoked from run_pipeline_watch
+            so signal handlers and the shutdown flag are managed by the caller.
     """
     ensure_dirs()
 
-    _pipeline_shutdown["graceful"] = False
-    _install_pipeline_signal_handlers()
+    if not _external_setup:
+        _pipeline_shutdown["graceful"] = False
+        _install_pipeline_signal_handlers()
 
-    # ── Auto-select models based on hardware ──────────────────────────
-    from scripts.utils import detect_hardware, select_optimal_models
-    hw = detect_hardware()
+    # ── Hardware profile + auto-select models ─────────────────────────
+    from scripts.utils import select_optimal_models
+
+    profile = get_profile()
     logger.info(
-        f"Hardware: {hw['cpu_count']} CPU cores, {hw['total_ram_gb']:.1f} GB RAM, "
-        f"Apple Silicon: {hw['is_apple_silicon']}"
+        "Hardware: %s (%s, %dP+%dE cores, %.1f GB RAM%s); "
+        "Whisper=%s (%s,%s); LLM tier=%s (n_gpu_layers=%d, n_threads=%d)",
+        profile.platform.value,
+        profile.machine,
+        profile.cpu_perf_cores,
+        max(0, profile.cpu_count_physical - profile.cpu_perf_cores),
+        profile.total_ram_gb,
+        f", virt={profile.virt_type}" if profile.is_virtual else "",
+        profile.whisper_model,
+        profile.whisper_device,
+        profile.whisper_compute_type,
+        profile.llm_tier,
+        profile.n_gpu_layers,
+        profile.n_threads,
     )
+
     if auto_models:
-        selected = select_optimal_models(hw)
+        selected = select_optimal_models()
         whisper_model = selected["whisper_model"]
         chosen_llm = selected["llm_model_path"]
         logger.info(
@@ -151,6 +176,16 @@ def run_pipeline(
         if chosen_llm:
             import os as _os
             _os.environ.setdefault("CIBOBUONO_LLM_MODEL", str(chosen_llm))
+
+    # ── Graceful LLM degradation on low-end hardware ──────────────────
+    if not skip_extract and not profile.enable_llm:
+        logger.warning(
+            "Hardware below LLM threshold (%.1f GB RAM, %s) — forcing "
+            "--skip-extract automatically. Extraction will use NER + rules "
+            "only and quality will be lower.",
+            profile.total_ram_gb, profile.platform.value,
+        )
+        skip_extract = True
 
     # ── Dashboard setup ───────────────────────────────────────────────
     dash = Dashboard()
@@ -245,7 +280,8 @@ def run_pipeline(
         if not to_process:
             _log("No pending videos to process")
             if not skip_push:
-                _git_push()
+                if _git_push_if_changed():
+                    _log("Pushed to GitHub")
             _log("Pipeline complete (no pending content)")
             return
 
@@ -253,12 +289,19 @@ def run_pipeline(
             from scripts.utils import resolve_llm_model_path
             mp = resolve_llm_model_path()
             if mp is None:
-                _log(
-                    "FATAL: extraction enabled but no GGUF model found. "
-                    "Add a .gguf under models/ or set CIBOBUONO_LLM_MODEL. "
-                    "Or pass --skip-extract."
-                )
-                raise SystemExit(1)
+                if profile.enable_llm:
+                    _log(
+                        "No GGUF model found but hardware supports LLM. "
+                        "Add a .gguf under models/ (recommended tier: "
+                        f"{profile.llm_tier}) or set CIBOBUONO_LLM_MODEL. "
+                        "Falling back to --skip-extract for this run."
+                    )
+                else:
+                    _log(
+                        "No GGUF model found and hardware below LLM threshold "
+                        "— running with --skip-extract."
+                    )
+                skip_extract = True
 
         if use_dash:
             dash.set_video_batch(len(to_process))
@@ -526,7 +569,6 @@ def run_pipeline(
                 # Correct timestamps: scan full transcript for best mention time
                 from scripts.extract_locales import find_best_timestamp_in_transcript
 
-                from scripts.chunk_transcription import seconds_to_timestamp as _stt
                 for e in extractions:
                     name = e.get("locale_name", "")
                     best_ts = find_best_timestamp_in_transcript(name, transcript)
@@ -680,10 +722,13 @@ def run_pipeline(
         if deleted:
             _log(f"Cleaned up {len(deleted)} old cached files")
 
-        # Git push
+        # Git push (only when something under data/ actually changed)
         if not skip_push:
-            _git_push()
-            _log("Pushed to GitHub")
+            pushed = _git_push_if_changed()
+            if pushed:
+                _log("Pushed to GitHub")
+            else:
+                _log("No data changes — git push skipped")
         else:
             _log("Git push skipped (--skip-push)")
 
@@ -694,7 +739,8 @@ def run_pipeline(
         _log("Pipeline complete!")
 
     finally:
-        _restore_pipeline_signal_handlers()
+        if not _external_setup:
+            _restore_pipeline_signal_handlers()
         if use_dash:
             dash.stop()
 
@@ -719,6 +765,133 @@ def _git_push():
     logger.info("Committing and pushing to GitHub...")
     from scripts.push_to_github import git_commit_and_push
     git_commit_and_push()
+
+
+def _data_dir_has_uncommitted_changes() -> bool:
+    """Return True iff `git status --porcelain` reports any change under data/."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--", str(DATA_DIR)],
+            capture_output=True,
+            text=True,
+            cwd=str(DATA_DIR.parent),
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"git status check failed ({e}); assuming changes exist")
+        return True
+
+    if result.returncode != 0:
+        logger.warning(
+            f"git status returned {result.returncode}; assuming changes exist. "
+            f"stderr={result.stderr[:200]}"
+        )
+        return True
+
+    return bool(result.stdout.strip())
+
+
+def _git_push_if_changed() -> bool:
+    """Commit and push only if there are uncommitted changes under data/.
+
+    Returns True if a push attempt was made, False if nothing changed.
+    """
+    if not _data_dir_has_uncommitted_changes():
+        return False
+    _git_push()
+    return True
+
+
+def _interruptible_sleep(total_seconds: float, slice_seconds: float = 5.0) -> None:
+    """Sleep up to total_seconds, returning early if a graceful shutdown is requested.
+
+    Polling in short slices keeps SIGINT/SIGTERM response time bounded.
+    """
+    import time
+
+    remaining = max(0.0, float(total_seconds))
+    while remaining > 0:
+        if _pipeline_shutdown["graceful"]:
+            return
+        chunk = min(slice_seconds, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
+
+
+def run_pipeline_watch(
+    poll_interval: float = WATCH_POLL_INTERVAL_SECONDS,
+    skip_fetch: bool = False,
+    skip_transcribe: bool = False,
+    skip_extract: bool = False,
+    skip_push: bool = False,
+    whisper_model: str = WHISPER_DEFAULT_MODEL,
+    max_videos: int = 100,
+    auto_models: bool = True,
+) -> None:
+    """Run the pipeline continuously: catalog + process + push + sleep, repeat.
+
+    Each cycle invokes :func:`run_pipeline` exactly as a one-shot run would, so
+    every guarantee (atomic JSON writes, --repair-stale-state, sliding window
+    cache cleanup, model caching) still holds.
+
+    Sleep is interruptible: SIGINT/SIGTERM stops the loop at the cycle boundary
+    (or at the next 5 s sleep slice). A second signal aborts the in-flight
+    cycle immediately, as in one-shot mode.
+
+    Models (Whisper, NER, LLM) are loaded lazily on the first cycle and reused
+    across cycles via the module-level caches in transcribe_video / extract_locales /
+    ner_candidates — no per-cycle memory growth.
+    """
+    poll_interval = max(float(poll_interval), float(WATCH_MIN_INTERVAL_SECONDS))
+
+    logger.info(
+        f"Starting watch mode: poll_interval={poll_interval:.0f}s, "
+        f"max_videos_per_cycle={max_videos}, skip_push={skip_push}"
+    )
+
+    _pipeline_shutdown["graceful"] = False
+    _install_pipeline_signal_handlers()
+
+    cycle_n = 0
+    try:
+        while not _pipeline_shutdown["graceful"]:
+            cycle_n += 1
+            logger.info(f"── Watch cycle #{cycle_n} starting ──")
+            cycle_started_at = datetime.now(timezone.utc)
+
+            try:
+                run_pipeline(
+                    skip_fetch=skip_fetch,
+                    skip_transcribe=skip_transcribe,
+                    skip_extract=skip_extract,
+                    skip_push=skip_push,
+                    whisper_model=whisper_model,
+                    max_videos=max_videos,
+                    no_dashboard=True,  # watch mode is log-only
+                    auto_models=auto_models,
+                    _external_setup=True,
+                )
+            except SystemExit:
+                raise
+            except Exception as e:
+                logger.exception(f"Watch cycle #{cycle_n} crashed: {e}")
+
+            elapsed = (datetime.now(timezone.utc) - cycle_started_at).total_seconds()
+            logger.info(
+                f"── Watch cycle #{cycle_n} finished in {elapsed:.0f}s ──"
+            )
+
+            if _pipeline_shutdown["graceful"]:
+                break
+
+            logger.info(f"Sleeping {poll_interval:.0f}s before next cycle...")
+            _interruptible_sleep(poll_interval)
+
+        logger.info(f"Watch mode stopped after {cycle_n} cycle(s)")
+    finally:
+        _restore_pipeline_signal_handlers()
 
 
 def _print_status():
@@ -876,8 +1049,28 @@ def main():
         "--status", action="store_true",
         help="Show pipeline status summary and exit (no processing)",
     )
+    parser.add_argument(
+        "--watch", action="store_true",
+        help="Continuous mode: keep cataloging+processing new videos in a loop "
+             "(SIGINT/SIGTERM stops gracefully between cycles)",
+    )
+    parser.add_argument(
+        "--poll-interval", type=int, default=WATCH_POLL_INTERVAL_SECONDS,
+        help=f"With --watch, seconds between cycles (default: {WATCH_POLL_INTERVAL_SECONDS}, "
+             f"min: {WATCH_MIN_INTERVAL_SECONDS})",
+    )
+    parser.add_argument(
+        "--print-hardware", action="store_true",
+        help="Print the detected hardware profile (Whisper + LLM params) as JSON and exit",
+    )
 
     args = parser.parse_args()
+
+    if args.print_hardware:
+        profile = get_profile()
+        json.dump(profile.to_dict(), sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return
 
     if args.repair_dry_run and not args.repair_stale_state:
         parser.error("--repair-dry-run requires --repair-stale-state")
@@ -904,12 +1097,27 @@ def main():
     if args.reset:
         _reset_all(reset_all_data=args.reset_all_data)
 
+    if args.watch:
+        if args.no_dashboard is False:
+            logger.info("Watch mode: dashboard disabled (log-only).")
+        run_pipeline_watch(
+            poll_interval=args.poll_interval,
+            skip_fetch=args.skip_fetch,
+            skip_transcribe=args.skip_transcribe,
+            skip_extract=args.skip_extract,
+            skip_push=args.skip_push,
+            whisper_model=args.whisper_model or WHISPER_DEFAULT_MODEL,
+            max_videos=args.max_videos,
+            auto_models=not args.no_auto_models,
+        )
+        return
+
     run_pipeline(
         skip_fetch=args.skip_fetch,
         skip_transcribe=args.skip_transcribe,
         skip_extract=args.skip_extract,
         skip_push=args.skip_push,
-        whisper_model=args.whisper_model or "large-v3-turbo",
+        whisper_model=args.whisper_model or WHISPER_DEFAULT_MODEL,
         max_videos=args.max_videos,
         no_dashboard=args.no_dashboard,
         auto_models=not args.no_auto_models,

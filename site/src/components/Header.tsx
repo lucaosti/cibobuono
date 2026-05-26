@@ -1,3 +1,6 @@
+import { useLanguage } from "../i18n/useLanguage";
+import { LANGUAGES, type Language } from "../i18n/messages";
+
 interface Props {
   total: number;
   sentimentFilter: string;
@@ -25,29 +28,32 @@ export default function Header({
   onNearMeChange,
   geoError,
 }: Props) {
+  const { language, setLanguage, t } = useLanguage();
+
   return (
     <header>
       <div className="header-left">
-        <h1>CiboBuono</h1>
-        <span className="header-count">{total} venues</span>
+        <h1>{t.appTitle}</h1>
+        <span className="header-count">{t.venuesCount(total)}</span>
       </div>
 
       <div className="header-controls">
         <input
           type="search"
-          placeholder="Search..."
+          placeholder={t.searchPlaceholder}
           value={searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
           className="search-input"
+          aria-label={t.searchPlaceholder}
         />
 
         <select
           value={cityFilter}
           onChange={(e) => onCityChange(e.target.value)}
           className="filter-select"
-          title="Filter by city"
+          title={t.filterByCityTitle}
         >
-          <option value="">All cities</option>
+          <option value="">{t.allCities}</option>
           {cities.map((c) => (
             <option key={c} value={c}>
               {c}
@@ -59,12 +65,12 @@ export default function Header({
           value={sentimentFilter}
           onChange={(e) => onSentimentChange(e.target.value)}
           className="filter-select"
-          title="Filter by sentiment"
+          title={t.filterBySentimentTitle}
         >
-          <option value="">All</option>
-          <option value="positive">Positive</option>
-          <option value="neutral">Neutral</option>
-          <option value="negative">Negative</option>
+          <option value="">{t.allSentiments}</option>
+          <option value="positive">{t.sentimentPositive}</option>
+          <option value="neutral">{t.sentimentNeutral}</option>
+          <option value="negative">{t.sentimentNegative}</option>
         </select>
 
         <div className="near-me-control">
@@ -75,17 +81,41 @@ export default function Header({
               onNearMeChange(v ? Number(v) : null);
             }}
             className="filter-select"
-            title="Near me"
+            title={t.nearMeTitle}
           >
-            <option value="">Near me</option>
-            <option value="1">1 km</option>
-            <option value="2">2 km</option>
-            <option value="5">5 km</option>
-            <option value="10">10 km</option>
-            <option value="25">25 km</option>
-            <option value="50">50 km</option>
+            <option value="">{t.nearMe}</option>
+            <option value="1">{t.km(1)}</option>
+            <option value="2">{t.km(2)}</option>
+            <option value="5">{t.km(5)}</option>
+            <option value="10">{t.km(10)}</option>
+            <option value="25">{t.km(25)}</option>
+            <option value="50">{t.km(50)}</option>
           </select>
-          {geoError && <span className="geo-error" title={geoError}>!</span>}
+          {geoError && (
+            <span className="geo-error" title={geoError}>
+              {t.geoErrorMarker}
+            </span>
+          )}
+        </div>
+
+        <div
+          className="language-toggle"
+          role="group"
+          aria-label={t.languageToggleLabel}
+        >
+          {LANGUAGES.map((opt) => (
+            <button
+              key={opt.code}
+              type="button"
+              className={`language-button ${
+                language === opt.code ? "active" : ""
+              }`}
+              aria-pressed={language === opt.code}
+              onClick={() => setLanguage(opt.code as Language)}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
       </div>
     </header>

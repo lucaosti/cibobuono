@@ -69,6 +69,40 @@ header {
   align-items: center;
 }
 
+.language-toggle {
+  display: inline-flex;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.language-button {
+  background: transparent;
+  color: white;
+  border: none;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.language-button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.language-button.active {
+  background: white;
+  color: #d32f2f;
+  cursor: default;
+}
+
+.language-button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: -2px;
+}
+
 .geo-error {
   position: absolute;
   right: -16px;

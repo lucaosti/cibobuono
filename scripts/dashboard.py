@@ -20,9 +20,9 @@ Usage (integrated into run_pipeline.py):
     dash.stop()
 """
 
-__author__ = "Luca Ostinelli"
-
 from __future__ import annotations
+
+__author__ = "Luca Ostinelli"
 
 import os
 import time

@@ -8,6 +8,7 @@ import {
 } from "react-leaflet";
 import L from "leaflet";
 import type { LocaleWithVisits } from "../types";
+import { useT } from "../i18n/useLanguage";
 
 import "leaflet/dist/leaflet.css";
 
@@ -56,6 +57,7 @@ interface Props {
 }
 
 export default function MapView({ locales, selected, onSelect }: Props) {
+  const t = useT();
   const center = useMemo<[number, number]>(() => {
     if (locales.length === 0) return [41.9, 12.5]; // Roma default
     const lat = locales.reduce((s, l) => s + l.lat, 0) / locales.length;
@@ -93,11 +95,11 @@ export default function MapView({ locales, selected, onSelect }: Props) {
             {loc.avgRating != null && (
               <>
                 <br />
-                Rating: {loc.avgRating}/10
+                {t.rating}: {t.ratingOutOf10(loc.avgRating)}
               </>
             )}
             <br />
-            {loc.visits.length} visit{loc.visits.length !== 1 ? "s" : ""}
+            {t.visitsCount(loc.visits.length)}
           </Popup>
         </Marker>
       ))}

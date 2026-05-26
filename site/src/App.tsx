@@ -5,6 +5,7 @@ import Header from "./components/Header";
 import MapView from "./components/MapView";
 import LocaleList from "./components/LocaleList";
 import StatusBar from "./components/StatusBar";
+import { useT } from "./i18n/useLanguage";
 import "./App.css";
 
 function haversineKm(
@@ -89,6 +90,7 @@ function enrichLocales(
 }
 
 export default function App() {
+  const t = useT();
   const [locales, setLocales] = useState<Locale[]>([]);
   const [visits, setVisits] = useState<Visit[]>([]);
   const [corrections, setCorrections] = useState<Correction[]>([]);
@@ -116,18 +118,18 @@ export default function App() {
         setVisits(v);
         setCorrections(c);
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load data");
+        setError(e instanceof Error ? e.message : t.errorLoadFailed);
       } finally {
         setLoading(false);
       }
     }
     load();
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (nearMeKm == null || userPos != null) return;
     if (!navigator.geolocation) {
-      setGeoError("Geolocation not supported");
+      setGeoError(t.errorGeolocationUnsupported);
       setNearMeKm(null);
       return;
     }
@@ -141,7 +143,7 @@ export default function App() {
         setNearMeKm(null);
       },
     );
-  }, [nearMeKm, userPos]);
+  }, [nearMeKm, userPos, t]);
 
   const correctedLocales = useMemo(
     () => applyCorrections(locales, corrections),

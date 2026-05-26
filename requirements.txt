@@ -3,11 +3,19 @@
 # YouTube download
 yt-dlp>=2024.0.0
 
-# Transcription (OpenAI Whisper - local, open source)
+# Transcription (Whisper — local, open source)
+# faster-whisper (CTranslate2 + Metal/CUDA) is the primary backend on Apple
+# Silicon: ~6–8× real-time on M-series with large-v3-turbo. openai-whisper
+# stays as a pure-Python safety fallback when CTranslate2 is unavailable.
+faster-whisper>=1.0.0
 openai-whisper>=20231117
 
 # LLM local inference
 llama-cpp-python>=0.3.22
+
+# Hardware detection (cross-platform RAM / physical CPU counts; powers
+# scripts/hardware.py optimal-parameter selection for Whisper + llama.cpp)
+psutil>=5.9.0
 
 # Zero-shot NER (neuro-symbolic venue candidates; CPU/MPS via PyTorch)
 torch>=2.2.0

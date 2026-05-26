@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CiboBuono pipeline — example macOS LaunchAgent.
+
+  This is an *example* template, not a working file.  Copy it to
+  ~/Library/LaunchAgents/com.cibobuono.pipeline.plist, replace the placeholders
+  marked __REPO__ and __VENV__ with absolute paths, then run:
+
+      launchctl load   ~/Library/LaunchAgents/com.cibobuono.pipeline.plist
+      launchctl start  com.cibobuono.pipeline
+
+  To stop / unload:
+
+      launchctl unload ~/Library/LaunchAgents/com.cibobuono.pipeline.plist
+
+  Behaviour:
+    - Starts the pipeline at login (RunAtLoad).
+    - Restarts automatically if it crashes (KeepAlive=true), waiting at least
+      ThrottleInterval seconds between restarts.
+    - Stdout/stderr go to logs/launchd_*.log inside the repo so they live with
+      the other pipeline logs.
+    - Replace --skip-push if you want autonomous git pushes instead of
+      collecting changes for manual review.
+
+  See `python -m scripts.run_pipeline --help` for the full flag list.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cibobuono.pipeline</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__VENV__/bin/python</string>
+        <string>-m</string>
+        <string>scripts.run_pipeline</string>
+        <string>--watch</string>
+        <string>--poll-interval</string>
+        <string>1800</string>
+        <string>--skip-push</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__VENV__/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- Optional: pin a specific GGUF model -->
+        <!--
+        <key>CIBOBUONO_LLM_MODEL</key>
+        <string>__REPO__/models/Qwen2.5-32B-Instruct-Q4_K_M.gguf</string>
+        -->
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>__REPO__/logs/launchd_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__REPO__/logs/launchd_stderr.log</string>
+
+    <!-- ProcessType=Background lowers priority a touch so the daemon doesn't
+         starve interactive apps when the LLM/Whisper saturate the GPU. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

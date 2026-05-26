@@ -16,6 +16,8 @@ The pipeline transcribes YouTube videos, proposes venue **candidates** with a lo
 
 The interactive map is deployed on **GitHub Pages** and updates automatically on every `git push` to `main`. It allows you to explore all reviewed locales with search and sentiment filters.
 
+The web UI is **bilingual (English / Italiano)**: the language is auto-detected from your browser, and a toggle in the header switches between EN and IT on the fly.
+
 > **Local preview**: `cd site && npm install && npm run dev`
 
 > **Python venv (pipeline)**: from repo root, `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`, then run `python -m scripts.run_pipeline ...`. Optional: `CIBOBUONO_LLM_MODEL` → a `.gguf` under `models/` or elsewhere; `CIBOBUONO_NER_MODEL` overrides the Hugging Face id for GLiNER (default `urchade/gliner_multi-v2.1`). **PyTorch** is required for NER (CPU or MPS on Apple Silicon); if GLiNER cannot load, a lightweight heuristic fallback still runs.
@@ -40,40 +42,50 @@ The interactive map is deployed on **GitHub Pages** and updates automatically on
 │   ├── visits.json                 # Locale visits/reviews from videos
 │   ├── processed_videos.json       # Incrementality tracker
 │   ├── flagged_segments.json       # Low-confidence segments for review
-│   └── skipped_videos.json         # Skipped videos (recipes, Shorts)
+│   ├── skipped_videos.json         # Skipped videos (recipes, Shorts)
+│   └── corrections.json            # Manual hide/edit overrides (preserved by --reset)
 │
 ├── scripts/                        # Pipeline modules (Python)
 │   ├── schemas.py                  # Pydantic models & validation
-│   ├── utils.py                    # Shared utilities, paths, config, hardware detection
+│   ├── utils.py                    # Shared utilities, paths, config, legacy detect_hardware shim
+│   ├── hardware.py                 # Cross-platform DeviceProfile (Whisper + llama.cpp params)
 │   ├── fetch_channels.py           # Extract channel metadata via yt-dlp
 │   ├── fetch_videos.py             # Catalog videos, detect recipes/Shorts, download audio
-│   ├── transcribe_video.py         # Transcription: YouTube subs first, Whisper fallback
+│   ├── transcribe_video.py         # Transcription: Whisper large-v3-turbo (primary) + YouTube manual subs (when present)
 │   ├── chunk_transcription.py      # Split transcripts into 90s chunks with 15s overlap
 │   ├── extract_locales.py          # Shared helpers: food gate, hints, timestamps, LLM handle
 │   ├── ner_candidates.py           # GLiNER venue candidates (+ heuristic fallback)
 │   ├── visit_classifier.py         # Italian rules + LLM yes/no for ambiguous cases
 │   ├── extract_pipeline.py         # Orchestrator: NER → classify → detail LLM → cross-chunk filter
+│   ├── video_intelligence.py       # Title + description + chapters analysis (rubrica, rating, hints)
 │   ├── geocode_locales.py          # Nominatim geocoding (free, rate-limited)
 │   ├── verify_locales.py           # OSM verification via Overpass API (anti-false-positive)
 │   ├── deduplicate_locales.py      # Fuzzy name + haversine distance deduplication
 │   ├── populate_json.py            # Write visits, flagged segments
 │   ├── handle_flagged_segments.py  # Import manually reviewed segments
+│   ├── repair_stale_state.py       # Repair pending-but-already-extracted videos
 │   ├── dashboard.py                # Rich live terminal dashboard
 │   ├── push_to_github.py           # Git commit & push
 │   ├── validate_data.py            # Validate data/*.json (Pydantic; CI / local)
-│   └── run_pipeline.py             # Main pipeline orchestrator (2-phase)
+│   ├── run_pipeline.py             # Main pipeline orchestrator (2-phase; --watch supported)
+│   └── com.cibobuono.pipeline.plist.example  # Example macOS LaunchAgent for --watch mode
 │
-├── site/                           # React + Vite + TypeScript (GitHub Pages)
+├── site/                           # React + Vite + TypeScript (GitHub Pages, bilingual EN/IT)
 │   ├── package.json                # Node dependencies
 │   ├── vite.config.ts              # Vite config (base: /cibobuono/)
+│   ├── index.html                  # HTML entry — title + meta description
 │   ├── src/
 │   │   ├── App.tsx                 # Main app: data loading, filtering, layout
 │   │   ├── api.ts                  # Fetch JSON from data/ at runtime
 │   │   ├── types.ts                # TypeScript types (mirrors Python schemas)
+│   │   ├── i18n/
+│   │   │   ├── messages.ts         # Typed EN + IT message dictionaries
+│   │   │   ├── LanguageContext.tsx # Provider (persists language in localStorage)
+│   │   │   └── useLanguage.ts      # useLanguage / useT hooks
 │   │   └── components/
 │   │       ├── MapView.tsx         # Leaflet map with sentiment-colored markers
 │   │       ├── LocaleList.tsx      # Sidebar list with expandable visit details
-│   │       ├── Header.tsx          # Search + sentiment filter bar
+│   │       ├── Header.tsx          # Search + filters + EN/IT language toggle
 │   │       └── StatusBar.tsx       # Loading/error states
 │   └── ...
 │
@@ -87,7 +99,13 @@ The interactive map is deployed on **GitHub Pages** and updates automatically on
 │   ├── test_extract_pipeline.py
 │   ├── test_verify.py
 │   ├── test_utils.py
-│   └── test_data_integrity.py
+│   ├── test_data_integrity.py
+│   ├── test_hardware.py            # DeviceProfile across simulated platforms
+│   ├── test_populate_json.py       # populate_visits + populate_flagged
+│   ├── test_repair_stale_state.py  # pending → processed repair
+│   ├── test_transcribe.py          # VTT parser + Whisper backend selection
+│   ├── test_video_intelligence.py  # Title / description / chapter parsing
+│   └── test_watch_loop.py          # --watch daemon mode
 │
 ├── models/                         # Local LLM GGUF models (gitignored)
 ├── cache/                          # Temp audio & transcripts (gitignored)
@@ -224,7 +242,7 @@ The pipeline runs in two phases:
 | 1  | Fetch channels       | yt-dlp                       | Extract metadata from channel URLs               |
 | 2  | Catalog videos       | yt-dlp                       | Catalog all videos, skip recipes & Shorts        |
 | 3  | Prefetch audio       | yt-dlp                       | Sliding window: pre-download up to 20 audio files|
-| 4  | Transcribe           | YouTube subs / Whisper `medium` | YouTube subtitles first, Whisper fallback       |
+| 4  | Transcribe           | Whisper `large-v3-turbo` (faster-whisper) + YouTube manual subs | Whisper primary; YouTube *manual* subs preferred when present (auto-subs ignored — they mangle Italian proper nouns) |
 | 5  | Chunk                | Python                       | Split into 90s chunks with 15s overlap           |
 | 6  | Extract              | GLiNER + rules + local LLM   | NER candidates → visit/mention → detail JSON (ratings) only if visit |
 | 7  | Cross-chunk filter   | Python                       | Keep venue if ≥2 chunks **or** title/description hint protects it |
@@ -246,7 +264,8 @@ Options:
   --skip-transcribe    Use cached transcripts
   --skip-extract       Skip LLM extraction
   --skip-push          Don't commit/push to GitHub
-  --whisper-model      tiny|base|small|medium|large (default: medium)
+  --whisper-model      tiny|base|small|medium|large|large-v2|large-v3|large-v3-turbo
+                       (default: auto-selected — large-v3-turbo on Apple Silicon / ≥8 GB)
   --max-videos N       Max pending videos per run (default: 100); 0 = all pending
   --no-dashboard       Disable live terminal dashboard (log-only mode)
   --reset              Reset pipeline data JSON, cache, and logs (keeps corrections unless --reset-all-data)
@@ -254,7 +273,30 @@ Options:
   --repair-stale-state Mark pending videos that already have visits/flagged as processed, then exit
   --repair-dry-run     With --repair-stale-state, print only (no writes)
   --status             Show pipeline status summary and exit
+  --watch              Continuous mode: keep cataloging + processing new videos in a loop
+  --poll-interval N    With --watch, seconds between cycles (default: 1800, min: 60)
 ```
+
+### Continuous mode (`--watch`)
+
+Run the pipeline as a long-lived daemon. Every poll interval it re-catalogs all channels, queues new videos as `pending` in `videos.json`, drains up to `--max-videos` (newest first), and pushes the resulting JSON delta to GitHub. If the process is killed and restarted later, any videos uploaded in the meantime are picked up on the next cycle.
+
+```bash
+# Local, no pushes (good for development):
+python -m scripts.run_pipeline --watch --poll-interval 1800 --skip-push
+
+# Production-ish: poll every 30 min, auto-push to GitHub on every change:
+python -m scripts.run_pipeline --watch
+```
+
+Behaviour notes:
+- Whisper, NER, and LLM models are loaded **once** on the first cycle and reused across cycles — RAM stays flat.
+- The terminal dashboard is force-disabled in `--watch` (log-only) so the process plays nicely with `tmux`/`launchd`.
+- `git push` only fires when `git status --porcelain data/` shows actual changes. Idle cycles (no new uploads on any followed channel) make zero commits.
+- **Ctrl+C / SIGTERM** stops gracefully at the cycle boundary (or, if mid-video, after the current video like in one-shot mode). Press a second time to abort immediately. The next start resumes from where you left off thanks to the `pending` status in `videos.json` and atomic JSON writes.
+- A transient exception in a cycle (e.g. yt-dlp network blip) is logged and the loop continues; `SystemExit` (e.g. missing GGUF model) terminates the daemon.
+
+For autostart on macOS, see `scripts/com.cibobuono.pipeline.plist.example`.
 
 **Interrupts (Ctrl+C / SIGTERM)** — First signal: finish the current video, then stop (coherent between videos). Second signal: quit immediately (run `python -m scripts.run_pipeline --repair-stale-state` if a video was left pending after visits were already saved). JSON files are saved via atomic replace to reduce corruption if the process is killed during a write.
 
@@ -266,15 +308,18 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 
 ### Key Features
 
-- **Newest-first processing**: Videos are processed newest-first because recent YouTube ASR models produce significantly better subtitles for Italian proper nouns.
-- **YouTube subtitles first**: Tries to download YouTube's own subtitles (auto-generated or manual) before falling back to local Whisper. YouTube ASR is far more accurate for Italian proper nouns.
-- **Whisper with `initial_prompt`**: When YouTube subs are unavailable, Whisper `medium` runs with an Italian food terminology prompt to bias transcription toward restaurant names.
+- **Newest-first processing**: Videos are processed newest-first so the freshest uploads land on the map quickest.
+- **Whisper-primary ASR**: Local Whisper `large-v3-turbo` via `faster-whisper` (CTranslate2 + Metal/CUDA) is the primary transcription engine. YouTube's *manual* subtitles are still preferred when an author has uploaded them (rare but high-quality); YouTube's *auto-generated* subtitles are explicitly **not** used because their Italian ASR mangles the proper nouns (venue/street names) we extract.
+- **Whisper with `initial_prompt`**: Whisper runs with an Italian food terminology prompt to bias transcription toward restaurant names, and with `vad_filter=True` on faster-whisper to drop silence/jingles.
+- **Continuous mode (`--watch`)**: Optional daemon loop that catalogs and processes new uploads forever, with model caching across cycles and graceful Ctrl+C.
 - **Video descriptions as context**: Descriptions supply regex-extracted **venue hints** (names/links); hints can protect a candidate so a single-chunk mention still counts as a catalogued visit when rules agree it was a visit.
 - **OSM real-place verification**: After geocoding, each locale is verified against OpenStreetMap via the Overpass API (500m radius, fuzzy name match ≥ 80) — if no matching food establishment exists near the coordinates, the extraction is rejected. This is the strongest anti-false-positive measure.
 - **Sliding window**: Audio files are pre-downloaded in a window of 20. As each video is processed, the oldest is cleaned up and the next is fetched.
 - **Neuro-symbolic extraction**: GLiNER proposes spans; Italian regex/heuristics decide many cases; the LLM answers visit yes/no with a quoted evidence span only when rules are unsure (no monolithic “extract everything” prompt).
 - **Non-food video filtering**: Videos with non-food keywords in the title (boxing, gaming, fitness, etc.) are automatically skipped.
-- **Hardware auto-detection**: CPU cores, Apple Silicon / Metal GPU, unified memory are detected at startup. LLM threads, batch size, GPU layers, and mlock are configured dynamically.
+- **Cross-platform hardware profiling**: `scripts/hardware.py` builds a frozen `DeviceProfile` at startup that recognises Apple Silicon (P/E cores), NVIDIA CUDA, AMD ROCm, Raspberry Pi 3/4/5, generic ARM/x86 Linux, Intel Macs, Windows CPU/CUDA, and VM/container environments. Whisper device + compute type, llama.cpp `n_threads` / `n_gpu_layers` / `n_batch` / `n_ctx`, Flash Attention + Q8_0 KV cache (Metal), and `use_mlock` are all tuned per profile. Run `python -m scripts.run_pipeline --print-hardware` to dump the detected profile as JSON.
+- **Bilingual web UI**: The React site is fully bilingual (English / Italiano). The language is auto-detected from `navigator.language`, user choice persists in `localStorage`, and an EN/IT toggle in the header lets visitors switch on the fly.
+- **Graceful LLM degradation**: On very low-RAM hardware (Raspberry Pi 3, Pi Zero 2W, or <1.5 GB containers), the pipeline automatically runs in NER+rules-only mode instead of crashing.
 - **Shorts filtering**: YouTube Shorts (URL `/shorts/` or duration ≤60s) are automatically skipped.
 - **Recipe filtering**: Videos with recipe keywords in the title are automatically skipped.
 - **Global model caching**: Whisper, NER, and LLM models are loaded once per session (NER via `transformers`/`gliner`).
@@ -284,9 +329,9 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 | Component      | Tool                             | License    |
 |----------------|----------------------------------|------------|
 | Video download | yt-dlp                           | Unlicense  |
-| Transcription  | YouTube subs (yt-dlp) + Whisper (fallback) | MIT |
+| Transcription  | faster-whisper / openai-whisper (primary) + YouTube manual subs via yt-dlp (when present) | MIT |
 | Venue NER      | GLiNER + PyTorch + Hugging Face `transformers` | Apache-2.0 / BSD |
-| LLM inference  | llama-cpp-python + GGUF (e.g. Llama 3.1 8B) | MIT     |
+| LLM inference  | llama-cpp-python + GGUF (Qwen 2.5 32B default; auto-selected per RAM, from 72B down to TinyLlama 1B on Raspberry Pi) | MIT     |
 | Geocoding      | Nominatim (OpenStreetMap)        | ODbL       |
 | Place verification | Overpass API (OpenStreetMap)  | ODbL       |
 | Deduplication  | thefuzz (fuzzy matching)         | MIT        |
@@ -295,6 +340,43 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 | Map            | Leaflet + react-leaflet + OSM    | BSD-2/ODbL |
 | CI/CD          | GitHub Actions + GitHub Pages    | —          |
 | Testing        | pytest                           | MIT        |
+
+## Hardware Support
+
+The pipeline detects the host environment exactly once at startup
+(`scripts.hardware.get_profile()`) and configures every model accordingly.
+Run `python -m scripts.run_pipeline --print-hardware` to see the active
+profile.
+
+| Profile                         | Whisper                          | LLM tier               | `n_threads`  | `n_gpu_layers` |
+|---------------------------------|----------------------------------|------------------------|--------------|----------------|
+| Apple Silicon (M-class) ≥ 16 GB | `large-v3-turbo` (CPU int8)†     | 14B → 32B              | P-cores      | -1 (Metal)     |
+| Linux + NVIDIA, VRAM ≥ 8 GB     | `large-v3-turbo` (CUDA fp16)     | 8B → 72B               | physical-1   | -1             |
+| Linux + NVIDIA, VRAM < 8 GB     | `large-v3-turbo` (CUDA int8_fp16)| 8B → 72B               | physical-1   | -1             |
+| Linux + AMD ROCm                | `large-v3-turbo` (CPU int8)‡     | per RAM                | physical-1   | -1             |
+| Linux x86_64 CPU-only           | `large-v3-turbo` / `medium`      | 8B / 14B               | physical-1   | 0              |
+| Linux generic ARM64             | `large-v3-turbo` / `small`       | per RAM                | physical-1   | 0              |
+| Raspberry Pi 5 (8 GB)           | `small`                          | 3B (e.g. Phi-3-mini)   | 4            | 0              |
+| Raspberry Pi 4 (4 GB)           | `small`                          | 1B (e.g. TinyLlama)    | 4            | 0              |
+| Raspberry Pi 3 / Zero 2W (1 GB) | `tiny`                           | none — rules-only mode | 4            | 0              |
+| Intel Mac                       | `large-v3-turbo` / `medium`      | per RAM                | physical-1   | 0              |
+| Windows + CUDA                  | as Linux CUDA                    | as Linux CUDA          | physical-1   | -1             |
+| Windows CPU-only                | as Linux CPU                     | as Linux CPU           | physical-1   | 0              |
+| VM / container (any of above)   | as base profile                  | as base                | base-1       | as base        |
+
+† faster-whisper has no Metal backend — CPU int8 with P-core threads is
+strictly faster than the (broken) CTranslate2-MPS path; llama.cpp still uses
+Metal via `n_gpu_layers=-1`.
+‡ faster-whisper has no native ROCm path; llama.cpp uses ROCm when built with
+`-DGGML_HIPBLAS`. The pipeline falls back to CPU Whisper but offloads the LLM.
+
+In every VM/container the pipeline disables `mlock` (it usually fails because
+of `RLIMIT_MEMLOCK`) and reserves one core for the host. On Apple Silicon it
+enables Flash Attention + Q8_0 quantized KV cache (~25 % memory saving) when
+the linked `llama-cpp-python` build supports it.
+
+If the detected RAM is below the LLM threshold, the pipeline transparently
+runs with `--skip-extract` so it never crashes on low-end hardware.
 
 ## Setup
 
@@ -314,15 +396,27 @@ pip install -r requirements.txt
 
 # Download a GGUF LLM model
 mkdir -p models
-# Recommended: Mistral 7B Instruct v0.2 Q4_K_M
-# Download from: https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF
-# Place: models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+# Recommended (auto-selected by RAM in this order):
+#   ≥40 GB → Qwen2.5-72B-Instruct-Q4_K_M.gguf  or  Llama-3.3-70B-Instruct-Q4_K_M.gguf
+#   ≥24 GB → Qwen2.5-32B-Instruct-Q4_K_M.gguf  or  gemma-3-27b-it-Q4_K_M.gguf
+#   ≥12 GB → Velvet-14B-Q4_K_M.gguf            (Italian-focused)
+#   ≥6  GB → Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+#   ≥3  GB → Phi-3-mini-4k-Instruct-Q4_K_M.gguf  or  Qwen2.5-3B-Instruct-Q4_K_M.gguf
+#   ≥1.5GB → tinyllama-1.1b-chat-v1.0-Q4_K_M.gguf  (Raspberry Pi 4)
+# Place the file(s) anywhere under models/. The pipeline auto-selects the
+# largest model that fits the detected hardware.
+
+# Inspect the active hardware profile (Whisper + llama.cpp params, JSON)
+python -m scripts.run_pipeline --print-hardware
 
 # Add channel URLs
 echo "https://www.youtube.com/@your-channel" >> channels_input.txt
 
 # Run the pipeline
 python -m scripts.run_pipeline --skip-push --max-videos 5
+
+# Continuous mode (catalog + process new uploads forever)
+python -m scripts.run_pipeline --watch --poll-interval 1800
 
 # Check status
 python -m scripts.run_pipeline --status
@@ -429,6 +523,8 @@ All issues are welcome — even a simple "this is wrong" helps improve the datas
 
 ---
 
+[⬆ Back to English version](#what-is-this)
+
 # 🇮🇹 Versione Italiana
 
 ## Cos'è?
@@ -444,6 +540,8 @@ La pipeline trascrive i video YouTube, propone **candidati locale** con NER mult
 ## Mappa Interattiva
 
 La mappa è deployata su **GitHub Pages** e si aggiorna automaticamente ad ogni `git push` su `main`. Permette di esplorare tutti i locali recensiti con ricerca e filtri per sentiment.
+
+La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automaticamente dal browser e un toggle IT/EN nell'header permette di cambiarla al volo.
 
 > **Anteprima locale**: `cd site && npm install && npm run dev`
 
@@ -469,40 +567,50 @@ La mappa è deployata su **GitHub Pages** e si aggiorna automaticamente ad ogni 
 │   ├── visits.json                 # Visite/recensioni dei locali dai video
 │   ├── processed_videos.json       # Tracker per incrementalità
 │   ├── flagged_segments.json       # Segmenti a bassa confidence per review
-│   └── skipped_videos.json         # Video saltati (ricette, Shorts)
+│   ├── skipped_videos.json         # Video saltati (ricette, Shorts)
+│   └── corrections.json            # Override manuali hide/edit (preservato da --reset)
 │
 ├── scripts/                        # Moduli della pipeline (Python)
 │   ├── schemas.py                  # Modelli Pydantic e validazione
-│   ├── utils.py                    # Utilità condivise, percorsi, config, hardware detection
+│   ├── utils.py                    # Utilità condivise, percorsi, config, shim detect_hardware
+│   ├── hardware.py                 # DeviceProfile cross-platform (parametri Whisper + llama.cpp)
 │   ├── fetch_channels.py           # Estrazione metadati canali via yt-dlp
 │   ├── fetch_videos.py             # Catalogo video, detection ricette/Shorts, download audio
-│   ├── transcribe_video.py         # Trascrizione: sottotitoli YouTube prima, Whisper fallback
+│   ├── transcribe_video.py         # Trascrizione: Whisper large-v3-turbo (primario) + sottotitoli YouTube manuali quando presenti
 │   ├── chunk_transcription.py      # Divisione trascrizioni in chunk da 90s con 15s overlap
 │   ├── extract_locales.py          # Helper condivisi: gate food, hints, timestamp, handle LLM
 │   ├── ner_candidates.py           # Candidati GLiNER (+ fallback euristico)
 │   ├── visit_classifier.py         # Regole italiane + LLM sì/no se ambiguo
 │   ├── extract_pipeline.py         # Orchestratore: NER → classificazione → LLM dettagli → filtro cross-chunk
+│   ├── video_intelligence.py       # Analisi titolo + descrizione + capitoli (rubrica, voto, hint)
 │   ├── geocode_locales.py          # Geocoding Nominatim (gratuito, rate-limited)
 │   ├── verify_locales.py           # Verifica OSM via Overpass API (anti-falsi positivi)
 │   ├── deduplicate_locales.py      # Deduplicazione fuzzy nome + distanza haversine
 │   ├── populate_json.py            # Scrittura visite e segmenti flaggati
 │   ├── handle_flagged_segments.py  # Importazione segmenti revisionati manualmente
+│   ├── repair_stale_state.py       # Ripara video pending già estratti
 │   ├── dashboard.py                # Dashboard live nel terminale (Rich)
 │   ├── push_to_github.py           # Commit e push su Git
 │   ├── validate_data.py            # Validazione data/*.json vs Pydantic (CI / locale)
-│   └── run_pipeline.py             # Orchestratore principale della pipeline (2 fasi)
+│   ├── run_pipeline.py             # Orchestratore principale della pipeline (2 fasi; supporta --watch)
+│   └── com.cibobuono.pipeline.plist.example  # Esempio LaunchAgent macOS per modalità --watch
 │
-├── site/                           # React + Vite + TypeScript (GitHub Pages)
+├── site/                           # React + Vite + TypeScript (GitHub Pages, bilingue EN/IT)
 │   ├── package.json                # Dipendenze Node
 │   ├── vite.config.ts              # Configurazione Vite (base: /cibobuono/)
+│   ├── index.html                  # Entry HTML — titolo + meta description
 │   ├── src/
 │   │   ├── App.tsx                 # App principale: caricamento dati, filtri, layout
 │   │   ├── api.ts                  # Fetch JSON da data/ a runtime
 │   │   ├── types.ts                # Tipi TypeScript (mirror degli schema Python)
+│   │   ├── i18n/
+│   │   │   ├── messages.ts         # Dizionari EN + IT tipizzati
+│   │   │   ├── LanguageContext.tsx # Provider (persiste la lingua in localStorage)
+│   │   │   └── useLanguage.ts      # Hook useLanguage / useT
 │   │   └── components/
 │   │       ├── MapView.tsx         # Mappa Leaflet con marker colorati per sentiment
 │   │       ├── LocaleList.tsx      # Lista nella sidebar con dettagli visite espandibili
-│   │       ├── Header.tsx          # Barra di ricerca + filtro sentiment
+│   │       ├── Header.tsx          # Ricerca + filtri + toggle lingua EN/IT
 │   │       └── StatusBar.tsx       # Stati di caricamento/errore
 │   └── ...
 │
@@ -516,7 +624,13 @@ La mappa è deployata su **GitHub Pages** e si aggiorna automaticamente ad ogni 
 │   ├── test_extract_pipeline.py
 │   ├── test_verify.py
 │   ├── test_utils.py
-│   └── test_data_integrity.py
+│   ├── test_data_integrity.py
+│   ├── test_hardware.py            # DeviceProfile su piattaforme simulate
+│   ├── test_populate_json.py       # populate_visits + populate_flagged
+│   ├── test_repair_stale_state.py  # Riparazione pending → processed
+│   ├── test_transcribe.py          # Parser VTT + selezione backend Whisper
+│   ├── test_video_intelligence.py  # Analisi titolo/descrizione/capitoli
+│   └── test_watch_loop.py          # Modalità --watch (daemon)
 │
 ├── models/                         # Modelli LLM GGUF (gitignored)
 ├── cache/                          # Audio e trascrizioni temporanee (gitignored)
@@ -653,7 +767,7 @@ La pipeline è divisa in due fasi:
 | 1  | Fetch canali         | yt-dlp                       | Estrai metadati dagli URL dei canali                |
 | 2  | Catalogo video       | yt-dlp                       | Cataloga tutti i video, salta ricette e Shorts      |
 | 3  | Prefetch audio       | yt-dlp                       | Finestra mobile: pre-scarica fino a 20 file audio   |
-| 4  | Trascrizione         | Sottotitoli YT / Whisper `medium` | Sottotitoli YouTube prima, Whisper fallback     |
+| 4  | Trascrizione         | Whisper `large-v3-turbo` (faster-whisper) + sottotitoli YT manuali | Whisper come primario; sottotitoli YouTube *manuali* preferiti quando presenti (gli auto-generati sono esclusi: massacrano i nomi propri italiani) |
 | 5  | Chunking             | Python                       | Dividi in chunk da 90s con overlap 15s              |
 | 6  | Estrazione           | GLiNER + regole + LLM locale | Candidati NER → visita/menzione → JSON dettaglio (voti) solo se visita |
 | 7  | Filtro cross-chunk   | Python                       | Mantieni il locale se ≥2 chunk **oppure** hint titolo/descrizione      |
@@ -675,7 +789,8 @@ Opzioni:
   --skip-transcribe    Usa trascrizioni in cache
   --skip-extract       Salta l'estrazione LLM
   --skip-push          Non fare commit/push su GitHub
-  --whisper-model      tiny|base|small|medium|large (default: medium)
+  --whisper-model      tiny|base|small|medium|large|large-v2|large-v3|large-v3-turbo
+                       (default: auto-selezionato — large-v3-turbo su Apple Silicon / ≥8 GB)
   --max-videos N       Max video pending per run (default: 100); 0 = tutti i pending
   --no-dashboard       Disabilita la dashboard live nel terminale
   --reset              Resetta i JSON della pipeline, cache e log (mantiene corrections salvo --reset-all-data)
@@ -683,7 +798,30 @@ Opzioni:
   --repair-stale-state Allinea videos.json/processed_videos.json se un video è pending ma ha già visite/flagged, poi esce
   --repair-dry-run     Con --repair-stale-state, solo stampa (nessuna scrittura)
   --status             Mostra il riepilogo dello stato e termina
+  --watch              Modalità continua: cataloga + processa nuovi video in loop
+  --poll-interval N    Con --watch, secondi tra un ciclo e l'altro (default: 1800, min: 60)
 ```
+
+### Modalità continua (`--watch`)
+
+Esegui la pipeline come daemon. A ogni intervallo di poll rilegge tutti i canali, mette in coda i video nuovi come `pending`, ne processa fino a `--max-videos` (dal più recente) e pusha il delta JSON su GitHub. Se il processo viene fermato e riavviato in seguito, tutti i video pubblicati nel frattempo entrano in coda al primo ciclo successivo.
+
+```bash
+# Locale, senza push (utile in sviluppo):
+python -m scripts.run_pipeline --watch --poll-interval 1800 --skip-push
+
+# Produzione: poll ogni 30 min, push automatico a ogni cambio:
+python -m scripts.run_pipeline --watch
+```
+
+Comportamento:
+- Whisper, NER e LLM vengono caricati **una sola volta** al primo ciclo e riutilizzati — la RAM non cresce nel tempo.
+- La dashboard live viene forzata su off in `--watch` (solo log) per non rompere con `tmux`/`launchd`.
+- `git push` parte solo se `git status --porcelain data/` mostra cambiamenti reali. Cicli senza nuovi upload = zero commit.
+- **Ctrl+C / SIGTERM** ferma in modo pulito al confine del ciclo (o, se siamo in mezzo a un video, alla fine del video corrente come in modalità one-shot). Premi due volte per uscita immediata. Al riavvio si riprende dallo stato `pending` in `videos.json` grazie alle scritture atomiche.
+- Un'eccezione transitoria in un ciclo (es. yt-dlp che fa cilecca) viene loggata e il loop continua; `SystemExit` (es. modello GGUF mancante) termina il daemon.
+
+Per autostart su macOS vedi `scripts/com.cibobuono.pipeline.plist.example`.
 
 **Interruzioni (Ctrl+C / SIGTERM)** — Primo segnale: termina il video corrente, poi si ferma (stato coerente tra un video e l’altro). Secondo segnale: uscita immediata (se serve, `python -m scripts.run_pipeline --repair-stale-state`). I JSON vengono scritti con sostituzione atomica per ridurre file corrotti se il processo muore durante il salvataggio.
 
@@ -695,15 +833,18 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 
 ### Funzionalità Chiave
 
-- **Processamento dal più recente**: I video vengono processati dal più recente perché i modelli ASR di YouTube recenti producono sottotitoli significativamente migliori per i nomi propri italiani.
-- **Sottotitoli YouTube prima**: Prova a scaricare i sottotitoli YouTube (auto-generati o manuali) prima di ricorrere a Whisper locale. L'ASR di YouTube è molto più accurato per i nomi propri italiani.
-- **Whisper con `initial_prompt`**: Quando i sottotitoli YouTube non sono disponibili, Whisper `medium` usa un prompt con terminologia food italiana per migliorare il riconoscimento dei nomi dei locali.
+- **Processamento dal più recente**: I video vengono processati dal più recente così gli upload più freschi arrivano sulla mappa per primi.
+- **Whisper come ASR primario**: Whisper locale `large-v3-turbo` via `faster-whisper` (CTranslate2 + Metal/CUDA) è il motore di trascrizione principale. I sottotitoli *manuali* di YouTube sono ancora preferiti quando l'autore li ha caricati (rari ma di altissima qualità); i sottotitoli *auto-generati* di YouTube sono esclusi perché l'ASR italiano massacra i nomi propri (locali, vie) che sono il cuore del dataset.
+- **Whisper con `initial_prompt`**: Whisper gira con un prompt di terminologia food italiana per orientare la trascrizione sui nomi dei locali, e con `vad_filter=True` su faster-whisper per scartare silenzi/sigle.
+- **Modalità continua (`--watch`)**: Loop daemon opzionale che cataloga e processa i nuovi upload all'infinito, con i modelli caricati una sola volta tra i cicli e Ctrl+C graceful.
 - **Descrizioni video come contesto**: Dalla descrizione si estraggono via regex gli **hint** sui nomi dei locali; un hint può proteggere un candidato così che una sola menzione in un chunk resti una visita catalogata quando le regole confermano la visita.
 - **Verifica OSM dei locali reali**: Dopo il geocoding, ogni locale viene verificato su OpenStreetMap tramite Overpass API (raggio 500m, fuzzy name match ≥ 80) — se nessun locale di ristorazione corrispondente esiste vicino alle coordinate, l'estrazione viene rifiutata. È la misura anti-falsi-positivi più potente.
 - **Finestra mobile**: I file audio vengono pre-scaricati in una finestra di 20. Man mano che un video viene processato, il più vecchio viene cancellato e il prossimo viene scaricato.
 - **Estrazione neuro-simbolica**: GLiNER propone gli span; regex/euristiche italiane decidono molti casi; l’LLM risponde sì/no visita con uno span di evidenza citato solo se le regole sono incerte (niente prompt monolitico “estrai tutto”).
 - **Filtro video non-food**: I video con keyword non-food nel titolo (boxing, gaming, fitness, ecc.) vengono automaticamente saltati.
-- **Hardware auto-detection**: CPU cores, Apple Silicon / Metal GPU, memoria unificata vengono rilevati allo startup. Thread, batch size, GPU layers e mlock dell'LLM vengono configurati dinamicamente.
+- **Profiling hardware cross-platform**: `scripts/hardware.py` costruisce all'avvio un `DeviceProfile` immutabile che riconosce Apple Silicon (core P/E), NVIDIA CUDA, AMD ROCm, Raspberry Pi 3/4/5, ARM/x86 Linux generico, Intel Mac, Windows CPU/CUDA e ambienti VM/container. Device + compute type di Whisper, `n_threads` / `n_gpu_layers` / `n_batch` / `n_ctx` di llama.cpp, Flash Attention + KV cache Q8_0 (Metal) e `use_mlock` sono tarati per profilo. `python -m scripts.run_pipeline --print-hardware` stampa il profilo in JSON.
+- **Sito web bilingue**: La web app React è completamente bilingue (Italiano / English). La lingua viene rilevata automaticamente da `navigator.language`, la scelta persiste in `localStorage` e un toggle IT/EN nell'header permette di cambiarla al volo.
+- **Degradazione LLM graceful**: Su hardware con pochissima RAM (Raspberry Pi 3, Pi Zero 2W, container <1.5 GB) la pipeline parte automaticamente in modalità solo NER+regole invece di crashare.
 - **Filtro Shorts**: Gli YouTube Shorts (URL `/shorts/` o durata ≤60s) vengono automaticamente saltati.
 - **Filtro ricette**: I video con parole chiave di ricette nel titolo vengono automaticamente saltati.
 - **Caching globale dei modelli**: Whisper, NER e LLM vengono caricati una sola volta per sessione (NER via `transformers`/`gliner`).
@@ -713,9 +854,9 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 | Componente     | Strumento                        | Licenza    |
 |----------------|----------------------------------|------------|
 | Download video | yt-dlp                           | Unlicense  |
-| Trascrizione   | Sottotitoli YouTube (yt-dlp) + Whisper (fallback) | MIT |
+| Trascrizione   | faster-whisper / openai-whisper (primario) + sottotitoli YouTube manuali via yt-dlp (quando presenti) | MIT |
 | NER locali     | GLiNER + PyTorch + Hugging Face `transformers` | Apache-2.0 / BSD |
-| Inferenza LLM  | llama-cpp-python + GGUF (es. Llama 3.1 8B) | MIT     |
+| Inferenza LLM  | llama-cpp-python + GGUF (Qwen 2.5 32B default; auto-selezione per RAM, da 72B fino a TinyLlama 1B su Raspberry Pi) | MIT     |
 | Geocoding      | Nominatim (OpenStreetMap)        | ODbL       |
 | Verifica locali | Overpass API (OpenStreetMap)     | ODbL       |
 | Deduplicazione | thefuzz (matching fuzzy)         | MIT        |
@@ -724,6 +865,44 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 | Mappa          | Leaflet + react-leaflet + OSM    | BSD-2/ODbL |
 | CI/CD          | GitHub Actions + GitHub Pages    | —          |
 | Testing        | pytest                           | MIT        |
+
+## Supporto Hardware
+
+La pipeline rileva l'ambiente host una sola volta all'avvio
+(`scripts.hardware.get_profile()`) e configura ogni modello di conseguenza.
+Esegui `python -m scripts.run_pipeline --print-hardware` per vedere il profilo
+attivo.
+
+| Profilo                          | Whisper                          | Tier LLM              | `n_threads`  | `n_gpu_layers` |
+|----------------------------------|----------------------------------|-----------------------|--------------|----------------|
+| Apple Silicon (serie M) ≥ 16 GB  | `large-v3-turbo` (CPU int8)†     | 14B → 32B             | core P       | -1 (Metal)     |
+| Linux + NVIDIA, VRAM ≥ 8 GB      | `large-v3-turbo` (CUDA fp16)     | 8B → 72B              | fisici-1     | -1             |
+| Linux + NVIDIA, VRAM < 8 GB      | `large-v3-turbo` (CUDA int8_fp16)| 8B → 72B              | fisici-1     | -1             |
+| Linux + AMD ROCm                 | `large-v3-turbo` (CPU int8)‡     | per RAM               | fisici-1     | -1             |
+| Linux x86_64 solo CPU            | `large-v3-turbo` / `medium`      | 8B / 14B              | fisici-1     | 0              |
+| Linux ARM64 generico             | `large-v3-turbo` / `small`       | per RAM               | fisici-1     | 0              |
+| Raspberry Pi 5 (8 GB)            | `small`                          | 3B (Phi-3-mini ecc.)  | 4            | 0              |
+| Raspberry Pi 4 (4 GB)            | `small`                          | 1B (TinyLlama ecc.)   | 4            | 0              |
+| Raspberry Pi 3 / Zero 2W (1 GB)  | `tiny`                           | none — solo regole    | 4            | 0              |
+| Mac Intel                        | `large-v3-turbo` / `medium`      | per RAM               | fisici-1     | 0              |
+| Windows + CUDA                   | come Linux CUDA                  | come Linux CUDA       | fisici-1     | -1             |
+| Windows solo CPU                 | come Linux CPU                   | come Linux CPU        | fisici-1     | 0              |
+| VM / container (qualunque sopra) | come profilo base                | come base             | base-1       | come base      |
+
+† faster-whisper non ha un backend Metal — CPU int8 con thread sui P-core è
+strettamente più veloce del path CTranslate2-MPS (che non funziona); llama.cpp
+usa comunque Metal con `n_gpu_layers=-1`.
+‡ faster-whisper non ha un path ROCm nativo; llama.cpp usa ROCm quando
+compilato con `-DGGML_HIPBLAS`. La pipeline ricade su Whisper CPU ma scarica
+l'LLM sulla GPU.
+
+In ogni VM/container la pipeline disabilita `mlock` (di solito fallisce per
+`RLIMIT_MEMLOCK`) e riserva un core per l'host. Su Apple Silicon abilita
+Flash Attention + KV cache quantizzata Q8_0 (~25 % di memoria in meno) se la
+build di `llama-cpp-python` collegata lo supporta.
+
+Se la RAM rilevata è sotto soglia per l'LLM, la pipeline esegue
+trasparentemente in `--skip-extract` evitando crash sull'hardware più piccolo.
 
 ## Installazione
 
@@ -743,15 +922,27 @@ pip install -r requirements.txt
 
 # Scarica un modello LLM GGUF
 mkdir -p models
-# Consigliato: Mistral 7B Instruct v0.2 Q4_K_M
-# Scarica da: https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF
-# Posiziona: models/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+# Consigliati (auto-selezionati in base alla RAM in quest'ordine):
+#   ≥40 GB → Qwen2.5-72B-Instruct-Q4_K_M.gguf  oppure  Llama-3.3-70B-Instruct-Q4_K_M.gguf
+#   ≥24 GB → Qwen2.5-32B-Instruct-Q4_K_M.gguf  oppure  gemma-3-27b-it-Q4_K_M.gguf
+#   ≥12 GB → Velvet-14B-Q4_K_M.gguf            (focalizzato italiano)
+#   ≥6  GB → Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+#   ≥3  GB → Phi-3-mini-4k-Instruct-Q4_K_M.gguf  oppure  Qwen2.5-3B-Instruct-Q4_K_M.gguf
+#   ≥1.5GB → tinyllama-1.1b-chat-v1.0-Q4_K_M.gguf  (Raspberry Pi 4)
+# Metti i file in models/. La pipeline seleziona automaticamente il modello
+# più grande che entra nell'hardware rilevato.
+
+# Ispeziona il profilo hardware attivo (parametri Whisper + llama.cpp, JSON)
+python -m scripts.run_pipeline --print-hardware
 
 # Aggiungi URL dei canali
 echo "https://www.youtube.com/@tuo-canale" >> channels_input.txt
 
 # Esegui la pipeline
 python -m scripts.run_pipeline --skip-push --max-videos 5
+
+# Modalità continua (cataloga + processa i nuovi upload all'infinito)
+python -m scripts.run_pipeline --watch --poll-interval 1800
 
 # Controlla lo stato
 python -m scripts.run_pipeline --status

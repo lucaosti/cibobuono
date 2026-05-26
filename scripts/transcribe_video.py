@@ -2,10 +2,12 @@
 transcribe_video.py — Transcribe video audio to text.
 
 Strategy (in priority order):
-1. Try downloading YouTube's own subtitles (auto-generated or manual) via yt-dlp.
-   YouTube's ASR models are far more accurate than local Whisper, especially for
-   Italian proper nouns (restaurant names, addresses, etc.).
-2. If YouTube subtitles are not available, fall back to local Whisper transcription.
+1. Try downloading YouTube's *manual* (human-written) subtitles via yt-dlp.
+   These are very rare but, when present, more accurate than any ASR.
+2. Otherwise transcribe locally with Whisper (faster-whisper on Apple Silicon /
+   CUDA; openai-whisper pure-Python fallback). YouTube's auto-generated
+   subtitles are NOT used because they mangle Italian proper nouns
+   (restaurant names, street names) which are the whole point of this dataset.
 
 Saves transcriptions as JSON in cache/ with segment-level timestamps.
 """
@@ -20,9 +22,11 @@ import re
 import subprocess
 from pathlib import Path
 
+from scripts.hardware import get_profile
 from scripts.utils import (
     CACHE_DIR,
     CONTENT_LANGUAGE,
+    WHISPER_DEFAULT_MODEL,
     ensure_dirs,
     setup_logging,
     yt_dlp_command,
@@ -39,66 +43,63 @@ _BACKEND_OPENAI = "openai_whisper"
 _whisper_model = None
 _whisper_model_name = None
 _whisper_backend = None
-_whisper_device = None  # cached so transcribe_audio avoids a second probe
+_whisper_device: str | None = None  # actual device used: "cuda" | "cpu" | "mps"
 
 
 # ---------------------------------------------------------------------------
-# YouTube subtitles (preferred — much higher quality)
+# YouTube manual subtitles (rare but highest quality when present)
 # ---------------------------------------------------------------------------
+#
+# Note: We deliberately do NOT try YouTube's auto-generated subtitles.  They
+# are produced by an ASR model that systematically mangles Italian proper
+# nouns ("Raimond di Garibaldi" instead of "Raimondi di Garibaldi",
+# "l'onoreficienza più scra" instead of "l'onorificenza più sacra", etc.),
+# which destroys downstream venue extraction.  Local Whisper large-v3-turbo
+# is significantly more accurate on the names we care about.
 
-def _download_youtube_subs(video_id: str) -> Path | None:
+def _download_youtube_manual_subs(video_id: str) -> Path | None:
     """
-    Download YouTube subtitles for a video via yt-dlp.
-    
-    Tries (in order):
-    1. Manual Italian subtitles (human-written — best quality)
-    2. Auto-generated Italian subtitles (YouTube ASR — very good)
-    
-    Returns path to the downloaded .vtt/.srt file, or None if unavailable.
+    Download YouTube *manual* (human-written) subtitles via yt-dlp.
+
+    Auto-generated subs are explicitly disabled — see module docstring.
+
+    Returns path to the downloaded .vtt file, or None if no manual subs exist.
     """
     ensure_dirs()
     output_template = str(CACHE_DIR / f"{video_id}_subs")
 
-    # First try manual Italian subs, then auto-generated
-    for sub_args in [
-        # Manual subs only
-        ["--write-subs", "--no-write-auto-subs", "--sub-langs", CONTENT_LANGUAGE],
-        # Auto-generated subs
-        ["--write-auto-subs", "--sub-langs", CONTENT_LANGUAGE],
-    ]:
-        try:
-            result = subprocess.run(
-                [
-                    *yt_dlp_command(),
-                    "--skip-download",
-                    *sub_args,
-                    "--sub-format", "vtt",
-                    "--convert-subs", "vtt",
-                    "-o", output_template,
-                    "--no-playlist",
-                    f"https://youtu.be/{video_id}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
+    try:
+        subprocess.run(
+            [
+                *yt_dlp_command(),
+                "--skip-download",
+                "--write-subs",
+                "--no-write-auto-subs",
+                "--sub-langs", CONTENT_LANGUAGE,
+                "--sub-format", "vtt",
+                "--convert-subs", "vtt",
+                "-o", output_template,
+                "--no-playlist",
+                f"https://youtu.be/{video_id}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
 
-            # yt-dlp appends language code and extension
-            for suffix in [".it.vtt", ".it.srt"]:
-                candidate = CACHE_DIR / f"{video_id}_subs{suffix}"
-                if candidate.exists() and candidate.stat().st_size > 100:
-                    sub_type = "manual" if "--no-write-auto-subs" in sub_args else "auto"
-                    logger.info(
-                        f"Downloaded YouTube subs ({sub_type}) for {video_id}: "
-                        f"{candidate.name} ({candidate.stat().st_size} bytes)"
-                    )
-                    return candidate
+        for suffix in [".it.vtt", ".it.srt"]:
+            candidate = CACHE_DIR / f"{video_id}_subs{suffix}"
+            if candidate.exists() and candidate.stat().st_size > 100:
+                logger.info(
+                    f"Downloaded YouTube manual subs for {video_id}: "
+                    f"{candidate.name} ({candidate.stat().st_size} bytes)"
+                )
+                return candidate
 
-        except (subprocess.TimeoutExpired, Exception) as e:
-            logger.debug(f"Sub download attempt failed for {video_id}: {e}")
-            continue
+    except (subprocess.TimeoutExpired, Exception) as e:
+        logger.debug(f"Manual sub download failed for {video_id}: {e}")
 
-    logger.info(f"No YouTube subtitles available for {video_id}")
+    logger.info(f"No YouTube manual subtitles available for {video_id}")
     return None
 
 
@@ -199,11 +200,11 @@ def _parse_vtt(vtt_path: Path) -> dict | None:
         "language": CONTENT_LANGUAGE,
         "text": " ".join(full_text_parts),
         "segments": segments,
-        "source": "youtube_subs",
+        "source": "youtube_subs_manual",
     }
 
     logger.info(
-        f"Parsed YouTube subs: {len(segments)} segments, "
+        f"Parsed YouTube manual subs: {len(segments)} segments, "
         f"{len(transcript['text'])} chars"
     )
     return transcript
@@ -226,12 +227,17 @@ def _vtt_time_to_seconds(time_str: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Local Whisper transcription (fallback)
+# Local Whisper transcription (primary ASR path)
 # ---------------------------------------------------------------------------
 
 
-def _detect_whisper_device() -> str:
-    """Detect the best available device for Whisper inference."""
+def _openai_whisper_device() -> str:
+    """Pick a device string for the openai-whisper fallback only.
+
+    openai-whisper *can* use Metal via PyTorch MPS; faster-whisper cannot
+    (CTranslate2 has no Metal backend), so this helper is intentionally
+    decoupled from the main DeviceProfile.
+    """
     try:
         import torch
         if torch.backends.mps.is_available():
@@ -243,11 +249,12 @@ def _detect_whisper_device() -> str:
     return "cpu"
 
 
-def _get_whisper_model(model_name: str = "large-v3"):
-    """
-    Load and cache the Whisper model. Tries faster-whisper first (CTranslate2,
-    2-4× faster on Apple Silicon Metal), falls back to openai-whisper.
-    Returns (model, backend) tuple.
+def _get_whisper_model(model_name: str = WHISPER_DEFAULT_MODEL):
+    """Load and cache the Whisper model.
+
+    Tries faster-whisper first (CTranslate2 — CUDA fp16 / CPU int8) and falls
+    back to openai-whisper, which can use Metal via PyTorch MPS. Device and
+    compute-type defaults come from :func:`scripts.hardware.get_profile`.
     """
     global _whisper_model, _whisper_model_name, _whisper_backend, _whisper_device
 
@@ -256,26 +263,30 @@ def _get_whisper_model(model_name: str = "large-v3"):
 
     from scripts.utils import MODELS_DIR
     download_root = str(MODELS_DIR / "whisper")
-    device = _detect_whisper_device()
-    # faster-whisper uses "auto" on Apple Silicon to pick Metal automatically
-    fw_device = "auto" if device == "mps" else device
-    compute_type = "float16" if device != "cpu" else "int8"
+    profile = get_profile()
+
+    # faster-whisper has no Metal backend: on Apple Silicon we run CPU + int8.
+    # On CUDA we use fp16 (or int8_float16 for small VRAM, picked in hardware.py).
+    fw_device = profile.whisper_device
+    compute_type = profile.whisper_compute_type
 
     try:
         from faster_whisper import WhisperModel
         logger.info(
-            f"Loading faster-whisper model: {model_name} "
-            f"(device={fw_device}, compute={compute_type})"
+            "Loading faster-whisper model: %s (device=%s, compute=%s, cpu_threads=%d)",
+            model_name, fw_device, compute_type, profile.whisper_cpu_threads,
         )
-        _whisper_model = WhisperModel(
-            model_name,
-            device=fw_device,
-            compute_type=compute_type,
-            download_root=download_root,
-        )
+        kwargs: dict = {
+            "device": fw_device,
+            "compute_type": compute_type,
+            "download_root": download_root,
+        }
+        if fw_device == "cpu" and profile.whisper_cpu_threads > 0:
+            kwargs["cpu_threads"] = profile.whisper_cpu_threads
+        _whisper_model = WhisperModel(model_name, **kwargs)
         _whisper_model_name = model_name
         _whisper_backend = _BACKEND_FASTER
-        _whisper_device = device
+        _whisper_device = fw_device
         logger.info("faster-whisper loaded successfully")
         return _whisper_model, _whisper_backend
     except ImportError:
@@ -292,6 +303,8 @@ def _get_whisper_model(model_name: str = "large-v3"):
         )
         return None, None
 
+    # openai-whisper can use Metal (MPS) when PyTorch is built with it.
+    device = _openai_whisper_device()
     logger.info(f"Loading openai-whisper model: {model_name} on {device}")
     _whisper_model = whisper.load_model(model_name, download_root=download_root, device=device)
     _whisper_model_name = model_name
@@ -309,19 +322,22 @@ def find_audio_file(video_id: str) -> Path | None:
     return None
 
 
-def transcribe_audio(video_id: str, model_name: str = "large-v3") -> dict | None:
+def transcribe_audio(video_id: str, model_name: str = WHISPER_DEFAULT_MODEL) -> dict | None:
     """
     Get transcription for a video.
-    
+
     Strategy:
-    1. Return cached transcript if available
-    2. Try downloading YouTube subtitles (auto-generated or manual)
-    3. Fall back to local Whisper transcription
-    
+    1. Return cached transcript if available.
+    2. Try YouTube *manual* (human-written) subtitles — rare but, when
+       present, more accurate than any ASR.
+    3. Otherwise transcribe locally with Whisper (faster-whisper preferred,
+       openai-whisper fallback). This is the *primary* path for almost every
+       video, because YouTube auto-subs mangle Italian proper nouns.
+
     Args:
         video_id: YouTube video ID
-        model_name: Whisper model size (used only as fallback)
-    
+        model_name: Whisper model size (default: large-v3-turbo)
+
     Returns:
         dict with 'text' (full transcript) and 'segments' (timestamped chunks)
     """
@@ -338,23 +354,22 @@ def transcribe_audio(video_id: str, model_name: str = "large-v3") -> dict | None
         except (json.JSONDecodeError, OSError):
             logger.warning(f"Cached transcription corrupted, re-transcribing: {video_id}")
 
-    # --- Strategy 1: Try YouTube subtitles first ---
-    subs_path = _download_youtube_subs(video_id)
+    # --- Strategy 1: YouTube *manual* subtitles (rare, but best when present) ---
+    subs_path = _download_youtube_manual_subs(video_id)
     if subs_path:
         transcript = _parse_vtt(subs_path)
         if transcript and len(transcript.get("segments", [])) > 0:
-            # Cache the transcript
             ensure_dirs()
             with open(transcript_path, "w", encoding="utf-8") as f:
                 json.dump(transcript, f, ensure_ascii=False, indent=2)
             logger.info(
-                f"✓ Using YouTube subtitles for {video_id} "
+                f"✓ Using YouTube manual subs for {video_id} "
                 f"({len(transcript['segments'])} segments)"
             )
             return transcript
 
-    # --- Strategy 2: Fall back to local Whisper ---
-    logger.info(f"Falling back to Whisper ({model_name}) for {video_id}")
+    # --- Strategy 2: Local Whisper (primary path) ---
+    logger.info(f"Transcribing with Whisper ({model_name}) for {video_id}")
     audio_path = find_audio_file(video_id)
     if not audio_path:
         logger.error(f"No audio file found for video {video_id}")
@@ -387,6 +402,7 @@ def transcribe_audio(video_id: str, model_name: str = "large-v3") -> dict | None
             language=CONTENT_LANGUAGE,
             initial_prompt=initial_prompt,
             beam_size=5,
+            vad_filter=True,
         )
         detected_lang = info.language
         for i, seg in enumerate(segs_gen):
@@ -443,7 +459,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     vid = sys.argv[1]
-    model = sys.argv[2] if len(sys.argv) > 2 else "large-v3"
+    model = sys.argv[2] if len(sys.argv) > 2 else WHISPER_DEFAULT_MODEL
     result = transcribe_audio(vid, model)
     if result:
         print(f"Transcribed {vid}: {len(result['segments'])} segments")

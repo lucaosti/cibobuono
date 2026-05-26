@@ -89,7 +89,12 @@ class TestParseVttScrollingDedup:
         assert "mondo" in result["text"]
 
     def test_source_field(self, tmp_vtt):
-        """Parsed transcript should have source='youtube_subs'."""
+        """Parsed transcript should be tagged as YouTube manual subs.
+
+        Manual VTTs are the only YouTube-sub path we still trust — the
+        auto-generated branch was removed because Italian proper nouns get
+        mangled (e.g. "Raimond di Garibaldi" instead of "Raimondi di Garibaldi").
+        """
         vtt = tmp_vtt(
             "WEBVTT\n\n"
             "00:00:00.000 --> 00:00:02.000\n"
@@ -97,7 +102,7 @@ class TestParseVttScrollingDedup:
         )
         result = _parse_vtt(vtt)
         assert result is not None
-        assert result["source"] == "youtube_subs"
+        assert result["source"] == "youtube_subs_manual"
 
     def test_empty_vtt_returns_none(self, tmp_vtt):
         """VTT with no cues returns None."""

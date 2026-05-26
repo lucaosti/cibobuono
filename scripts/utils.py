@@ -78,6 +78,17 @@ PREFETCH_WINDOW = 20  # Max audio files to keep pre-downloaded at any time
 # --- Verification ---
 LLM_VERIFY = True  # Enable LLM self-verification pass on extracted locales
 
+# --- Continuous mode (run_pipeline --watch) ---
+WATCH_POLL_INTERVAL_SECONDS = 1800  # 30 min default between catalog+process cycles
+WATCH_MIN_INTERVAL_SECONDS = 60     # safety floor for --poll-interval
+
+# --- Whisper default ---
+# Updated to large-v3-turbo: same quality as large-v3 for Italian proper nouns
+# at ~3× the throughput, and the default for every hardware tier ≥8 GB RAM.
+# Lower tiers (Raspberry Pi, low-RAM x86) downgrade automatically via
+# scripts.hardware.get_profile().whisper_model.
+WHISPER_DEFAULT_MODEL = "large-v3-turbo"
+
 
 def yt_dlp_command() -> list[str]:
     """Argv prefix to run yt-dlp via the current interpreter (works inside a venv)."""
@@ -206,120 +217,88 @@ def cleanup_cache(max_files: int = MAX_CACHED_VIDEOS) -> list[str]:
 
 
 def detect_hardware() -> dict:
-    """Detect system capabilities for optimal LLM configuration.
+    """Legacy hardware-detection shim — kept for backwards compatibility.
 
-    Auto-detects CPU cores, Apple Silicon, unified memory size, and configures:
-    - n_threads: performance cores (half logical on Apple Silicon)
-    - n_gpu_layers: -1 for Metal GPU, 0 for CPU-only
-    - n_batch: tuned for available memory (2048 with ≥16 GB unified)
-    - use_mlock: keep model locked in RAM
+    Delegates to :func:`scripts.hardware.get_profile` and returns the subset of
+    fields that legacy callers expect (``n_threads``, ``n_gpu_layers``,
+    ``use_mlock``, ``n_batch``, ``cpu_count``, ``total_ram_gb``,
+    ``is_apple_silicon``). New code should call ``get_profile()`` directly.
     """
-    import os as _os
-    import platform as _platform
+    from .hardware import get_profile
 
-    cpu_count = _os.cpu_count() or 4
-    is_apple_silicon = (
-        _platform.machine() == "arm64" and _platform.system() == "Darwin"
-    )
-
-    # Detect total system memory (GB)
-    total_ram_gb = 8
-    try:
-        import subprocess as _sp
-        if _platform.system() == "Darwin":
-            r = _sp.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
-            total_ram_gb = int(r.stdout.strip()) / (1024 ** 3)
-        else:
-            total_ram_gb = _os.sysconf("SC_PAGE_SIZE") * _os.sysconf("SC_PHYS_PAGES") / (1024 ** 3)
-    except Exception:
-        pass
-
-    if is_apple_silicon:
-        optimal_threads = max(4, cpu_count // 2)
-        n_gpu_layers = -1
-        use_mlock = True
-        n_batch = 2048 if total_ram_gb >= 16 else 1024
-    else:
-        optimal_threads = max(2, cpu_count - 2)
-        n_gpu_layers = 0
-        use_mlock = False
-        n_batch = 512
-
+    profile = get_profile()
     return {
-        "n_threads": optimal_threads,
-        "n_gpu_layers": n_gpu_layers,
-        "use_mlock": use_mlock,
-        "n_batch": n_batch,
-        "cpu_count": cpu_count,
-        "total_ram_gb": round(total_ram_gb, 1),
-        "is_apple_silicon": is_apple_silicon,
+        "n_threads": profile.n_threads,
+        "n_gpu_layers": profile.n_gpu_layers,
+        "use_mlock": profile.use_mlock,
+        "n_batch": profile.n_batch,
+        "n_ctx": profile.n_ctx,
+        "use_mmap": profile.use_mmap,
+        "cpu_count": profile.cpu_count_logical,
+        "total_ram_gb": profile.total_ram_gb,
+        "is_apple_silicon": profile.platform.value == "apple_silicon",
+        "platform": profile.platform.value,
     }
 
 
-def select_optimal_models(hw: dict | None = None) -> dict:
-    """
-    Select the best available models based on hardware and what's already downloaded.
+# LLM tier definitions — single source of truth. Mirrored in
+# scripts/hardware.py::LLM_TIERS to keep the standalone profile detector
+# self-contained.
+LLM_TIER_CANDIDATES: tuple[tuple[str, float], ...] = (
+    ("72B", 40),
+    ("70B", 40),
+    ("32B", 24),
+    ("27B", 20),
+    ("14B", 12),
+    ("8B", 6),
+    ("3B", 3),
+    ("1B", 1.5),
+)
 
-    LLM tiers (RAM-based, GGUF in models/):
-      ≥40 GB → prefer 72B or 70B Q4  (Qwen2.5-72B or Llama-3.3-70B)
-      ≥24 GB → prefer 32B or 27B Q4  (Qwen2.5-32B or Gemma-3-27B)
-      ≥16 GB → prefer 14B Q4         (Velvet-14B or similar)
-       <16 GB → use 8B Q4            (Llama-3.1-8B or similar)
 
-    Whisper tiers:
-      Apple Silicon or ≥8 GB → large-v3 (full, best proper noun accuracy)
-      <8 GB CPU-only         → medium
-
-    NER: gliner-x-large-v0.5 (default); overridable via CIBOBUONO_NER_MODEL.
-    """
-    if hw is None:
-        hw = detect_hardware()
-
-    ram = hw.get("total_ram_gb", 8)
-    is_apple = hw.get("is_apple_silicon", False)
-
-    # ── Whisper ──────────────────────────────────────────────────────────────
-    # large-v3 (full, 32 decoder layers) is preferred over large-v3-turbo for
-    # Italian proper nouns (restaurant names, addresses). Speed penalty on
-    # Apple Silicon Metal is modest.
-    if is_apple or ram >= 8:
-        whisper_model = "large-v3"
-    else:
-        whisper_model = "medium"
-
-    # ── LLM (check what's actually present in models/) ───────────────────────
-    # Priority list: (filename_fragment, min_ram_gb)
-    # "72B" catches Qwen2.5-72B; "70B" catches Llama-3.3-70B; "27B" catches Gemma-3-27B.
-    llm_candidates = [
-        ("72B", 40),
-        ("70B", 40),
-        ("32B", 24),
-        ("27B", 20),
-        ("14B", 12),
-        ("8B",   0),
-    ]
-
-    llm_model: Optional[Path] = None
-    llm_tier = "8B"
-    for fragment, min_ram in llm_candidates:
-        if ram < min_ram:
-            continue
-        matches = sorted(MODELS_DIR.glob(f"*{fragment}*.gguf"))
+def resolve_llm_model_path_for_tier(tier: str) -> Optional[Path]:
+    """Return the best GGUF in ``models/`` whose filename contains *tier*
+    (e.g. "32B"). Falls back to the first GGUF available; returns None when
+    the directory is empty or the tier is "none"."""
+    if tier == "none":
+        return None
+    if tier:
+        matches = sorted(MODELS_DIR.glob(f"*{tier}*.gguf"))
         if matches:
-            llm_model = matches[0]
-            llm_tier = fragment
-            break
+            return matches[0]
+    all_ggufs = sorted(MODELS_DIR.glob("*.gguf"))
+    return all_ggufs[0] if all_ggufs else None
 
-    # Fall back to any GGUF if none of the above matched
-    if llm_model is None:
-        all_ggufs = sorted(MODELS_DIR.glob("*.gguf"))
-        if all_ggufs:
-            llm_model = all_ggufs[0]
-            llm_tier = "unknown"
+
+def select_optimal_models(hw: dict | None = None) -> dict:
+    """Pick the best Whisper + LLM models for the detected hardware profile.
+
+    The Whisper choice and LLM tier come from :mod:`scripts.hardware`; this
+    function only resolves the tier to an actual GGUF file in ``models/``.
+
+    Tiers (RAM-based):
+        ≥40 GB → 72B / 70B   (Qwen2.5-72B, Llama-3.3-70B)
+        ≥24 GB → 32B / 27B   (Qwen2.5-32B, Gemma-3-27B)
+        ≥12 GB → 14B         (Velvet-14B)
+        ≥6  GB → 8B          (Llama-3.1-8B)
+        ≥3  GB → 3B          (Phi-3-mini, Qwen2.5-3B) — Raspberry Pi 5 8 GB
+        ≥1.5GB → 1B          (TinyLlama, Qwen2.5-1.5B) — Raspberry Pi 4 4 GB
+        else    → none       (NER+rules-only extraction)
+
+    The ``hw`` argument is accepted for backwards compatibility but ignored —
+    we always go through ``get_profile()`` so the answer is deterministic.
+    """
+    from .hardware import get_profile
+
+    profile = get_profile()
+    llm_path = resolve_llm_model_path_for_tier(profile.llm_tier)
 
     return {
-        "whisper_model": whisper_model,
-        "llm_model_path": llm_model,
-        "llm_tier": llm_tier,
-        "hw": hw,
+        "whisper_model": profile.whisper_model,
+        "llm_model_path": llm_path,
+        "llm_tier": profile.llm_tier,
+        "enable_llm": profile.enable_llm,
+        "profile": profile,
+        # Back-compat: legacy callers (validate_data, dashboard) read hw.* keys
+        "hw": detect_hardware(),
     }
