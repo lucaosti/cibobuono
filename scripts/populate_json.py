@@ -16,6 +16,7 @@ from scripts.utils import (
     VISITS_JSON,
     load_json,
     save_json,
+    save_json_split,
     setup_logging,
     today_str,
 )
@@ -164,7 +165,7 @@ def populate_visits(
 
     if new_visits:
         all_visits = existing_visits + new_visits
-        save_json(VISITS_JSON, all_visits)
+        save_json_split(VISITS_JSON, all_visits)
         logger.info(f"Added {len(new_visits)} visits ({len(all_visits)} total)")
 
     return new_visits

@@ -179,6 +179,61 @@ def save_json(path: Path, data: list) -> None:
         raise
 
 
+JSON_SPLIT_THRESHOLD_MB = 45
+
+
+def save_json_split(path: Path, data: list) -> None:
+    """Save a list as JSON, splitting into pages when the payload exceeds
+    JSON_SPLIT_THRESHOLD_MB.
+
+    Small files: saved normally at ``path`` (no sentinel, no extra files).
+
+    Large files: data is split into ``path.stem_0.json``, ``path.stem_1.json``,
+    … and ``path`` is written as a sentinel ``{"_pages": N}`` so callers know
+    to fetch the numbered chunks. Old single-file and old chunk files are
+    cleaned up atomically.
+    """
+    encoded = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    threshold = JSON_SPLIT_THRESHOLD_MB * 1024 * 1024
+
+    # Remove any stale chunk files left from a previous split run
+    for old_chunk in sorted(path.parent.glob(f"{path.stem}_[0-9]*.json")):
+        old_chunk.unlink(missing_ok=True)
+
+    if len(encoded) <= threshold:
+        save_json(path, data)
+        return
+
+    # Calculate chunk size so each chunk stays under the threshold
+    n_chunks = len(encoded) // threshold + 1
+    chunk_size = max(1, len(data) // n_chunks)
+    chunks = [data[i : i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+    for i, chunk in enumerate(chunks):
+        save_json(path.parent / f"{path.stem}_{i}.json", chunk)
+
+    # Write sentinel in place of the monolithic file
+    sentinel = {"_pages": len(chunks)}
+    fd, tmp = tempfile.mkstemp(
+        suffix=".json.tmp", prefix=f".{path.name}.", dir=str(path.parent), text=True
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(sentinel, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+    logging.getLogger("utils").info(
+        f"Split {path.name} into {len(chunks)} pages "
+        f"({len(encoded) / 1024 / 1024:.1f} MB total)"
+    )
+
+
 def today_str() -> str:
     """Return today's date as YYYY-MM-DD string."""
     return date.today().strftime("%Y-%m-%d")

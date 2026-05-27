@@ -25,6 +25,7 @@ from scripts.utils import (
     LOCALES_JSON,
     load_json,
     save_json,
+    save_json_split,
     setup_logging,
 )
 from scripts.schemas import Locale, generate_locale_id
@@ -240,7 +241,7 @@ def deduplicate_locales(new_locales: list[dict]) -> tuple[list[dict], list[dict]
             })
             logger.info(f"New locale: '{name}' ({locale_id})")
 
-    save_json(LOCALES_JSON, existing)
+    save_json_split(LOCALES_JSON, existing)
     logger.info(f"Locales after dedup: {len(existing)} total")
 
     return existing, locale_mapping

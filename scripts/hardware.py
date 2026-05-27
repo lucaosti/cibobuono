@@ -235,10 +235,11 @@ def _detect_ram_gb() -> float:
 
 
 def _detect_cuda() -> tuple[bool, str | None, float | None]:
-    """(has_cuda, gpu_name, vram_gb) via nvidia-smi.
+    """(has_cuda, gpu_name, vram_gb).
 
-    nvidia-smi works on Linux and Windows when the NVIDIA driver is installed.
-    Returns (False, None, None) when unavailable. We pick the *first* GPU.
+    Tries nvidia-smi first; falls back to PyTorch CUDA detection when
+    nvidia-smi is not installed (driver present but tool missing).
+    Returns (False, None, None) when no NVIDIA GPU is found.
     """
     try:
         out = subprocess.run(
@@ -252,22 +253,41 @@ def _detect_cuda() -> tuple[bool, str | None, float | None]:
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False, None, None
+        out = None
     except Exception as exc:
         logger.debug(f"nvidia-smi probe failed: {exc}")
-        return False, None, None
+        out = None
 
-    if out.returncode != 0 or not out.stdout.strip():
-        return False, None, None
+    if out is not None and out.returncode == 0 and out.stdout.strip():
+        first = out.stdout.strip().splitlines()[0]
+        parts = [p.strip() for p in first.split(",")]
+        if len(parts) >= 2:
+            name = parts[0] or None
+            try:
+                vram_mb = float(parts[1])
+                vram_gb = round(vram_mb / 1024.0, 2)
+            except ValueError:
+                vram_gb = None
+            return True, name, vram_gb
 
-    first = out.stdout.strip().splitlines()[0]
-    parts = [p.strip() for p in first.split(",")]
-    if len(parts) < 2:
-        return False, None, None
-    name = parts[0] or None
+    # Fallback: PyTorch CUDA detection (works when nvidia-smi is missing)
     try:
-        vram_mb = float(parts[1])
-        vram_gb = round(vram_mb / 1024.0, 2)
+        import torch  # lazy import — not in requirements-ci.txt
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            name = torch.cuda.get_device_name(0)
+            props = torch.cuda.get_device_properties(0)
+            vram_gb = round(props.total_memory / 1024 ** 3, 2)
+            logger.debug(f"CUDA detected via PyTorch: {name} ({vram_gb} GB)")
+            return True, name, vram_gb
+    except Exception as exc:
+        logger.debug(f"PyTorch CUDA fallback failed: {exc}")
+
+    return False, None, None
+
+    # (unreachable — kept for structural symmetry with old code)
+    try:
+        vram_mb = 0.0  # type: ignore[assignment]
+        vram_gb = None
     except ValueError:
         vram_gb = None
     return True, name, vram_gb

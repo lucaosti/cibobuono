@@ -62,11 +62,13 @@ jobs:
         run: |
           mkdir -p site/dist/data
           cp data/channels.json site/dist/data/
-          cp data/locales.json site/dist/data/
-          cp data/visits.json site/dist/data/
           cp data/videos.json site/dist/data/
           cp data/flagged_segments.json site/dist/data/
           if [ -f data/corrections.json ]; then cp data/corrections.json site/dist/data/; fi
+          # locales and visits may be split into paged files (locales_0.json, …)
+          for f in data/locales*.json data/visits*.json; do
+            [ -f "$f" ] && cp "$f" site/dist/data/
+          done
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
