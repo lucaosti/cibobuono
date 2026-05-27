@@ -10,9 +10,10 @@ __author__ = "Luca Ostinelli"
 
 import sys
 
-from scripts.utils import DATA_DIR, SKIPPED_VIDEOS_JSON, load_json
+from scripts.utils import CORRECTIONS_JSON, DATA_DIR, SKIPPED_VIDEOS_JSON, load_json
 from scripts.schemas import (
     validate_channels,
+    validate_corrections,
     validate_flagged_segments,
     validate_locales,
     validate_processed_videos,
@@ -45,6 +46,12 @@ def main() -> int:
         validate_skipped_videos(data)
     except Exception as e:
         errors.append(f"skipped_videos.json: {e}")
+
+    try:
+        data = load_json(CORRECTIONS_JSON)
+        validate_corrections(data)
+    except Exception as e:
+        errors.append(f"corrections.json: {e}")
 
     if errors:
         for line in errors:

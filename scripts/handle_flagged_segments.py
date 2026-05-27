@@ -7,7 +7,10 @@ this script imports the corrected data into locales.json and visits.json.
 
 __author__ = "Luca Ostinelli"
 
+import urllib.parse
+
 from scripts.utils import (
+    CHANNELS_JSON,
     FLAGGED_SEGMENTS_JSON,
     LOCALES_JSON,
     VIDEOS_JSON,
@@ -39,6 +42,8 @@ def process_reviewed_segments() -> tuple[int, int]:
     locales = load_json(LOCALES_JSON)
     visits = load_json(VISITS_JSON)
     videos = load_json(VIDEOS_JSON)
+    channels = load_json(CHANNELS_JSON)
+    channel_map = {ch["channel_id"]: ch for ch in channels}
 
     existing_visit_ids = {v["visit_id"] for v in visits}
 
@@ -86,6 +91,8 @@ def process_reviewed_segments() -> tuple[int, int]:
             logger.info(f"Reviewed locale matches existing: {locale_name} -> {locale_id}")
         else:
             locale_id = generate_locale_id(locale_name, lat, lon)
+            query = urllib.parse.quote_plus(f"{locale_name} {city}".strip())
+            google_maps_url = f"https://www.google.com/maps/search/?api=1&query={query}"
             locale_entry = {
                 "locale_id": locale_id,
                 "name": locale_name,
@@ -95,6 +102,7 @@ def process_reviewed_segments() -> tuple[int, int]:
                 "lat": lat,
                 "lon": lon,
                 "category": [],
+                "google_maps_url": google_maps_url,
             }
             try:
                 Locale(**locale_entry)
@@ -111,12 +119,22 @@ def process_reviewed_segments() -> tuple[int, int]:
         visit_id = generate_visit_id(video_id, start_seconds)
 
         if visit_id not in existing_visit_ids:
-            # Find video publish date
+            # Find video publish date and channel rubriche
             publish_date = today_str()
             for v in videos:
                 if v["video_id"] == video_id:
                     publish_date = v.get("publish_date", today_str())
                     break
+
+            channel_rubriche = channel_map.get(channel_id, {}).get("rubriche", [])
+            rubrica = segment.get("rubrica", "")
+            if not rubrica and len(channel_rubriche) == 1:
+                rubrica = channel_rubriche[0]
+
+            valid_sentiments = {"positive", "neutral", "negative"}
+            sentiment = segment.get("sentiment", "neutral")
+            if sentiment not in valid_sentiments:
+                sentiment = "neutral"
 
             visit = {
                 "visit_id": visit_id,
@@ -127,8 +145,9 @@ def process_reviewed_segments() -> tuple[int, int]:
                 "timestamp_end": segment.get("timestamp_end", "0:00"),
                 "youtube_url": f"https://youtu.be/{video_id}?t={start_seconds}",
                 "rating": segment.get("rating"),
-                "sentiment": "neutral",
-                "rubrica": "",
+                "sentiment": sentiment,
+                "rubrica": rubrica,
+                "notes": segment.get("notes", ""),
                 "llm_confidence": segment.get("llm_confidence", 0.0),
                 "extraction_date": today_str(),
                 "date": publish_date,

@@ -201,6 +201,27 @@ class FlaggedSegment(BaseModel):
     city: Optional[str] = Field(default=None, description="City if identified during review")
 
 
+class CorrectionOverrides(BaseModel):
+    name: Optional[str] = Field(default=None)
+    city: Optional[str] = Field(default=None)
+    rating: Optional[float] = Field(default=None)
+    sentiment: Optional[Sentiment] = Field(default=None)
+
+
+class Correction(BaseModel):
+    locale_id: str = Field(..., description="Reference to locales.json locale_id")
+    type: str = Field(..., description="Correction type: 'hide' or 'edit'")
+    reason: Optional[str] = Field(default=None, description="Human-readable reason")
+    overrides: Optional[CorrectionOverrides] = Field(default=None, description="Field overrides for 'edit' type")
+
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, v: str) -> str:
+        if v not in ("hide", "edit"):
+            raise ValueError(f"type must be 'hide' or 'edit', got: {v}")
+        return v
+
+
 class SkippedVideo(BaseModel):
     video_id: str = Field(..., description="YouTube video ID")
     channel_id: str = Field(default="", description="Reference to channels.json")
@@ -260,3 +281,7 @@ def validate_processed_videos(data: list[dict]) -> list[ProcessedVideo]:
 
 def validate_skipped_videos(data: list[dict]) -> list[SkippedVideo]:
     return [SkippedVideo(**item) for item in data]
+
+
+def validate_corrections(data: list[dict]) -> list[Correction]:
+    return [Correction(**item) for item in data]

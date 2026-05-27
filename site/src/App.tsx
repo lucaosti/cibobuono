@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Locale, Visit, LocaleWithVisits, Correction } from "./types";
 import { fetchLocales, fetchVisits, fetchCorrections } from "./api";
 import Header from "./components/Header";
@@ -91,6 +91,9 @@ function enrichLocales(
 
 export default function App() {
   const t = useT();
+  const tRef = useRef(t);
+  useEffect(() => { tRef.current = t; });
+
   const [locales, setLocales] = useState<Locale[]>([]);
   const [visits, setVisits] = useState<Visit[]>([]);
   const [corrections, setCorrections] = useState<Correction[]>([]);
@@ -118,18 +121,18 @@ export default function App() {
         setVisits(v);
         setCorrections(c);
       } catch (e) {
-        setError(e instanceof Error ? e.message : t.errorLoadFailed);
+        setError(e instanceof Error ? e.message : tRef.current.errorLoadFailed);
       } finally {
         setLoading(false);
       }
     }
     load();
-  }, [t]);
+  }, []); // run once on mount — language changes must not re-fetch
 
   useEffect(() => {
     if (nearMeKm == null || userPos != null) return;
     if (!navigator.geolocation) {
-      setGeoError(t.errorGeolocationUnsupported);
+      setGeoError(tRef.current.errorGeolocationUnsupported);
       setNearMeKm(null);
       return;
     }
@@ -143,7 +146,7 @@ export default function App() {
         setNearMeKm(null);
       },
     );
-  }, [nearMeKm, userPos, t]);
+  }, [nearMeKm, userPos]);
 
   const correctedLocales = useMemo(
     () => applyCorrections(locales, corrections),

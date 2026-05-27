@@ -85,4 +85,4 @@ export interface LocaleWithVisits extends Locale {
 }
 
 /** GitHub repo config for issue submission */
-export const GITHUB_REPO = "lucaostinelli/cibobuono";
+export const GITHUB_REPO = "lucaosti/cibobuono";

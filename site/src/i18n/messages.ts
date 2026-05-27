@@ -70,6 +70,9 @@ export interface Messages {
   issueCorrectionEntryHeader: string;
   issueReasonFalsePositive: string;
 
+  // Category labels (backend produces Italian raw strings)
+  categoryLabel: (cat: string) => string;
+
   // Errors
   errorLoadFailed: string;
   errorGeolocationUnsupported: string;
@@ -131,6 +134,29 @@ export const en: Messages = {
   issueCorrectionEntryHeader: "### corrections.json entry",
   issueReasonFalsePositive: "False positive — not actually visited",
 
+  categoryLabel: (cat: string) => {
+    const map: Record<string, string> = {
+      forno: "bakery",
+      panificio: "bakery",
+      ristorante: "restaurant",
+      trattoria: "trattoria",
+      osteria: "osteria",
+      pizzeria: "pizzeria",
+      bar: "bar",
+      caffe: "café",
+      caffè: "café",
+      pasticceria: "pastry shop",
+      gelateria: "ice cream shop",
+      street_food: "street food",
+      mercato: "market",
+      enoteca: "wine bar",
+      rosticceria: "rotisserie",
+      braceria: "grill",
+      pescheria: "fish restaurant",
+    };
+    return map[cat.toLowerCase()] ?? cat;
+  },
+
   errorLoadFailed: "Failed to load data",
   errorGeolocationUnsupported: "Geolocation not supported",
 
@@ -189,6 +215,29 @@ export const it: Messages = {
   issueFieldNotes: "**Note:**",
   issueCorrectionEntryHeader: "### Voce per corrections.json",
   issueReasonFalsePositive: "Falso positivo — non effettivamente visitato",
+
+  categoryLabel: (cat: string) => {
+    const map: Record<string, string> = {
+      forno: "forno",
+      panificio: "panificio",
+      ristorante: "ristorante",
+      trattoria: "trattoria",
+      osteria: "osteria",
+      pizzeria: "pizzeria",
+      bar: "bar",
+      caffe: "caffè",
+      caffè: "caffè",
+      pasticceria: "pasticceria",
+      gelateria: "gelateria",
+      street_food: "street food",
+      mercato: "mercato",
+      enoteca: "enoteca",
+      rosticceria: "rosticceria",
+      braceria: "braceria",
+      pescheria: "pescheria",
+    };
+    return map[cat.toLowerCase()] ?? cat;
+  },
 
   errorLoadFailed: "Impossibile caricare i dati",
   errorGeolocationUnsupported: "Geolocalizzazione non supportata",

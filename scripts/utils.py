@@ -75,9 +75,6 @@ MAX_CACHED_VIDEOS = 20  # Delete oldest videos when cache exceeds this
 # --- Prefetch / Sliding window ---
 PREFETCH_WINDOW = 20  # Max audio files to keep pre-downloaded at any time
 
-# --- Verification ---
-LLM_VERIFY = True  # Enable LLM self-verification pass on extracted locales
-
 # --- Continuous mode (run_pipeline --watch) ---
 WATCH_POLL_INTERVAL_SECONDS = 1800  # 30 min default between catalog+process cycles
 WATCH_MIN_INTERVAL_SECONDS = 60     # safety floor for --poll-interval
@@ -209,10 +206,17 @@ def cleanup_cache(max_files: int = MAX_CACHED_VIDEOS) -> list[str]:
     for f in to_delete:
         f.unlink()
         deleted.append(str(f))
-        # Also clean up corresponding transcript
-        transcript = f.parent / f"{f.stem}_transcript.json"
-        if transcript.exists():
-            transcript.unlink()
+        stem = f.stem
+        companions = [
+            f.parent / f"{stem}_transcript.json",
+            f.parent / f"{stem}_metadata.json",
+            f.parent / f"{stem}_description.txt",
+        ]
+        for companion in companions:
+            if companion.exists():
+                companion.unlink()
+        for sub in f.parent.glob(f"{stem}_subs.*"):
+            sub.unlink()
     return deleted
 
 

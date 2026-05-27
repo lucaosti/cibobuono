@@ -188,7 +188,9 @@ export default function LocaleList({ locales, selected, onSelect }: Props) {
                 {t.videosCount(loc.visits.length)}
               </span>
               {loc.category.length > 0 && (
-                <span className="categories">{loc.category.join(", ")}</span>
+                <span className="categories">
+                  {loc.category.map((c) => t.categoryLabel(c)).join(", ")}
+                </span>
               )}
             </div>
 

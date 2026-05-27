@@ -374,6 +374,81 @@ def run_pipeline(
                         _refresh_stats()
                     continue
 
+                # Step 3.5: Metadata + video intelligence (pre-Whisper filters)
+                # Fetch title/description intel and run cheap skip checks before
+                # spending minutes on transcription.
+                video_intel = None
+                youtube_extra: dict | None = None
+                video_description: str | None = None
+
+                if not skip_extract:
+                    if use_dash:
+                        dash.set_step("Video intel")
+                    from scripts.fetch_videos import (
+                        fetch_video_description,
+                        fetch_video_metadata,
+                        detect_non_food_video,
+                    )
+                    from scripts.video_intelligence import (
+                        analyze_title,
+                        analyze_description,
+                        analyze_description_timestamps,
+                        analyze_chapters,
+                        parse_description_timestamps,
+                    )
+
+                    ym = fetch_video_metadata(video_id)
+                    video_description = fetch_video_description(video_id)
+                    if not video_description and ym.get("description"):
+                        video_description = ym["description"]
+                    if video_description:
+                        _log(f"  Video description: {len(video_description)} chars")
+
+                    chapters = ym.get("chapters") or []
+                    dts = parse_description_timestamps(video_description or "")
+                    youtube_extra = {
+                        "chapters": chapters,
+                        "description_timestamps": dts,
+                    }
+                    if chapters or dts:
+                        _log(
+                            f"  YouTube extra: {len(chapters)} chapters, "
+                            f"{len(dts)} description timestamps"
+                        )
+
+                    video_intel = analyze_title(v_title)
+                    video_intel = analyze_description(video_description or "", video_intel)
+                    video_intel = analyze_description_timestamps(dts, video_intel)
+                    video_intel = analyze_chapters(chapters, video_intel)
+
+                    # Title-based skip before Whisper
+                    if video_intel.video_type == "non_review" and video_intel.skip_reason:
+                        _log(f"  ✗ Skipped (title analysis: non-review): {video_intel.skip_reason}")
+                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
+                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
+                        recap["outcome"] = "skipped_non_review"
+                        if use_dash:
+                            dash.tick_stat("processed")
+                            dash.complete_video()
+                            _refresh_stats()
+                        continue
+
+                    _log(f"  Intel: type={video_intel.video_type}, city={video_intel.city}, "
+                         f"hints={len(video_intel.venue_hints)}")
+
+                    # Description-based non-food skip before Whisper
+                    is_nf, nf_reason = detect_non_food_video(v_title, video_description)
+                    if is_nf:
+                        _log(f"  ✗ Skipped (non-food via description): {nf_reason}")
+                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
+                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
+                        recap["outcome"] = "skipped_non_food"
+                        if use_dash:
+                            dash.tick_stat("processed")
+                            dash.complete_video()
+                            _refresh_stats()
+                        continue
+
                 # Step 4: Transcribe
                 if use_dash:
                     dash.set_step("Transcribe")
@@ -430,10 +505,6 @@ def run_pipeline(
                         _refresh_stats()
                     continue
 
-                # Title intel (used after extract; must exist when skip_extract)
-                video_intel = None
-                youtube_extra: dict | None = None
-
                 # Step 6: Extract locales with LLM
                 if use_dash:
                     dash.set_step("Extract (LLM)")
@@ -441,73 +512,8 @@ def run_pipeline(
                     _log("  Extracting locales with LLM...")
                     from scripts.extract_locales import is_food_review_video
                     from scripts.extract_pipeline import extract_from_video
-                    from scripts.fetch_videos import (
-                        fetch_video_description,
-                        fetch_video_metadata,
-                        detect_non_food_video,
-                    )
-                    from scripts.video_intelligence import (
-                        analyze_title,
-                        analyze_description,
-                        analyze_description_timestamps,
-                        analyze_chapters,
-                        parse_description_timestamps,
-                    )
 
-                    ym = fetch_video_metadata(video_id)
-                    video_description = fetch_video_description(video_id)
-                    if not video_description and ym.get("description"):
-                        video_description = ym["description"]
-                    if video_description:
-                        _log(f"  Video description: {len(video_description)} chars")
-
-                    chapters = ym.get("chapters") or []
-                    dts = parse_description_timestamps(video_description or "")
-                    youtube_extra = {
-                        "chapters": chapters,
-                        "description_timestamps": dts,
-                    }
-                    if chapters or dts:
-                        _log(
-                            f"  YouTube extra: {len(chapters)} chapters, "
-                            f"{len(dts)} description timestamps"
-                        )
-
-                    # ── Title/description/chapter intelligence ──────────
-                    video_intel = analyze_title(v_title)
-                    video_intel = analyze_description(video_description or "", video_intel)
-                    video_intel = analyze_description_timestamps(dts, video_intel)
-                    video_intel = analyze_chapters(chapters, video_intel)
-
-                    # Title-based skip for non-review videos
-                    if video_intel.video_type == "non_review" and video_intel.skip_reason:
-                        _log(f"  ✗ Skipped (title analysis: non-review): {video_intel.skip_reason}")
-                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
-                        recap["outcome"] = "skipped_non_review"
-                        if use_dash:
-                            dash.tick_stat("processed")
-                            dash.complete_video()
-                            _refresh_stats()
-                        continue
-
-                    _log(f"  Intel: type={video_intel.video_type}, city={video_intel.city}, "
-                         f"hints={len(video_intel.venue_hints)}")
-
-                    # Re-check non-food with description
-                    is_nf, nf_reason = detect_non_food_video(v_title, video_description)
-                    if is_nf:
-                        _log(f"  ✗ Skipped (non-food via description): {nf_reason}")
-                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
-                        recap["outcome"] = "skipped_non_food"
-                        if use_dash:
-                            dash.tick_stat("processed")
-                            dash.complete_video()
-                            _refresh_stats()
-                        continue
-
-                    # LLM food-relevance gate
+                    # LLM food-relevance gate (uses transcript; cheap checks ran in step 3.5)
                     transcript_text = transcript.get("text", "")
                     is_food, food_reason = is_food_review_video(
                         v_title, transcript_text, video_description

@@ -403,6 +403,7 @@ def transcribe_audio(video_id: str, model_name: str = WHISPER_DEFAULT_MODEL) -> 
             initial_prompt=initial_prompt,
             beam_size=5,
             vad_filter=True,
+            condition_on_previous_text=False,
         )
         detected_lang = info.language
         for i, seg in enumerate(segs_gen):
