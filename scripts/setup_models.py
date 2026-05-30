@@ -163,6 +163,12 @@ def download_ner() -> None:
     """Warm GLiNER Hugging Face cache."""
     logger.info("Warming NER model: %s", NER_MODEL_NAME)
     try:
+        import langdetect  # noqa: F401 — required by gliner at runtime
+    except ImportError as exc:
+        raise SystemExit(
+            "langdetect not installed. pip install langdetect"
+        ) from exc
+    try:
         from gliner import GLiNER
     except ImportError as exc:
         raise SystemExit("gliner not installed. pip install gliner transformers torch") from exc
@@ -182,8 +188,12 @@ def verify_assets(*, models_dir: Path = MODELS_DIR) -> list[str]:
         issues.append(f"Whisper cache empty under {whisper_dir}")
 
     try:
+        import langdetect  # noqa: F401
+    except ImportError:
+        issues.append("langdetect not installed (required by GLiNER)")
+
+    try:
         from gliner import GLiNER
-        # Warm check only when transformers cache dir exists; full load is expensive.
         GLiNER.from_pretrained(NER_MODEL_NAME)
     except ImportError:
         issues.append("gliner not installed")

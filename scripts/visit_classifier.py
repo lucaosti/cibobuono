@@ -224,6 +224,7 @@ NON_VENUE_TERMS = frozenset({
     "cannolo", "cannoli", "panino", "hamburger", "burger", "kebab", "ramen",
     "sushi", "bistecca", "tartare", "crudo", "mozzarella", "burrata", "prosciutto",
     "salame", "vino", "birra", "caffè", "caffe", "espresso", "cappuccino",
+    "wagyu", "kobe", "allevati", "manzo", "carne",
     "menu", "antipasto", "primo", "secondo", "contorno", "dolce", "dessert",
     # generic / filler
     "buono", "buonissimo", "ottimo", "delizioso", "fantastico", "spettacolare",
@@ -294,7 +295,7 @@ def verify_venue_name(llm, name: str, window_text: str) -> bool:
         return bool(data.get("visit"))
     except Exception as e:
         logger.warning(f"Venue verification failed for '{name}': {e}")
-        return True  # do not lose candidates on transient LLM errors
+        return False  # precision-first: reject when verifier unavailable
 
 
 def classify_candidate(

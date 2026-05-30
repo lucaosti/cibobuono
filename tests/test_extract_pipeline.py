@@ -55,14 +55,15 @@ def test_pipeline_single_chunk_protected_keeps_visit():
 
     with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
         with patch("scripts.extract_pipeline.get_llm", return_value=mock_llm):
-            with patch("scripts.extract_pipeline.classify_candidate", return_value=(True, "[rule:test]", 0.85, "rule")):
-                ext, flagged = extract_from_video(
-                    "vid1",
-                    chunks,
-                    video_title="Hit: Peppe",
-                    video_intel=FakeIntel(),
-                    transcript=transcript,
-                )
+            with patch("scripts.extract_pipeline.discover_venues_llm", return_value=[]):
+                with patch("scripts.extract_pipeline.classify_candidate", return_value=(True, "[rule:test]", 0.85, "rule")):
+                    ext, flagged = extract_from_video(
+                        "vid1",
+                        chunks,
+                        video_title="Hit: Peppe",
+                        video_intel=FakeIntel(),
+                        transcript=transcript,
+                    )
     assert len(ext) >= 1
     assert any(e["locale_name"] == "Peppe Mangione" for e in ext)
 
@@ -94,11 +95,12 @@ def test_pipeline_drops_belgium_name_drop_without_signals():
 
     with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
         with patch("scripts.extract_pipeline.get_llm", return_value=None):
-            with patch(
-                "scripts.extract_pipeline.classify_candidate",
-                return_value=(False, "[rule:test]", 0.7, "rule"),
-            ):
-                ext, _ = extract_from_video("v2", chunks, transcript=transcript)
+            with patch("scripts.extract_pipeline.discover_venues_llm", return_value=[]):
+                with patch(
+                    "scripts.extract_pipeline.classify_candidate",
+                    return_value=(False, "[rule:test]", 0.7, "rule"),
+                ):
+                    ext, _ = extract_from_video("v2", chunks, transcript=transcript)
     assert ext == []
 
 
@@ -136,17 +138,18 @@ def test_pipeline_single_chunk_llm_keeps_visit():
 
     with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
         with patch("scripts.extract_pipeline.get_llm", return_value=mock_llm):
-            with patch("scripts.extract_pipeline.verify_venue_name", return_value=True):
-                with patch(
-                    "scripts.extract_pipeline.classify_candidate",
-                    return_value=(True, "evidence", 0.85, "llm"),
-                ):
-                    ext, flagged = extract_from_video(
-                        "v3",
-                        chunks,
-                        video_title="Roma criminale",
-                        transcript=transcript,
-                    )
+            with patch("scripts.extract_pipeline.discover_venues_llm", return_value=[]):
+                with patch("scripts.extract_pipeline.verify_venue_name", return_value=True):
+                    with patch(
+                        "scripts.extract_pipeline.classify_candidate",
+                        return_value=(True, "evidence", 0.85, "llm"),
+                    ):
+                        ext, flagged = extract_from_video(
+                            "v3",
+                            chunks,
+                            video_title="Roma criminale",
+                            transcript=transcript,
+                        )
     assert any(e["locale_name"] == "Trattoria Rossi" for e in ext)
     assert not any(f.get("locale_name") == "Trattoria Rossi" for f in flagged)
 

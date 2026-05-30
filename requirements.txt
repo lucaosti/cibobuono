@@ -21,6 +21,7 @@ psutil>=5.9.0
 torch>=2.2.0
 transformers>=4.40.0
 gliner>=0.2.0
+langdetect>=1.0.9
 
 # Geocoding (open source, no API key)
 geopy>=2.4.0

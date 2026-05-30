@@ -249,8 +249,30 @@ def extract_chunk_candidates(
                 venues.append(c)
             elif label in CONTEXT_LABELS:
                 context.append(c)
-        # When GLiNER is loaded we trust it: no capitalized-phrase fallback,
-        # which was a major false-positive source.
+
+        # Union trigger-anchored heuristics (high precision) — catches "siamo da X"
+        # when GLiNER misses or mislabels ASR-garbled names.
+        seen_spans = {(c.start_char, c.end_char) for c in venues}
+        for name, start, end, score in _heuristic_venue_spans(text):
+            if any(abs(start - s) < 3 and abs(end - e) < 3 for s, e in seen_spans):
+                continue
+            st = (
+                _char_span_to_start_time(start, end, ranges, t_fallback)
+                if ranges
+                else t_fallback
+            )
+            venues.append(
+                Candidate(
+                    name=name,
+                    label="restaurant",
+                    start_char=start,
+                    end_char=end,
+                    start_time=st,
+                    chunk_index=chunk_index,
+                    ner_score=score,
+                )
+            )
+            seen_spans.add((start, end))
         return venues, context
 
     # Heuristic fallback: treat all as venue candidates, no structured context

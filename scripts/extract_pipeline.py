@@ -30,6 +30,7 @@ from scripts.extract_locales import (
 from scripts.utils import CONFIDENCE_THRESHOLD
 from scripts.ner_candidates import Candidate, extract_chunk_candidates
 from scripts.utils import setup_logging
+from scripts.venue_discovery import discover_venues_llm
 from scripts.visit_classifier import (
     classify_candidate,
     get_transcript_window,
@@ -182,8 +183,8 @@ def _promote_venue_hints(
         return
 
     seen = {_normalize_name(e["locale_name"]) for e in extractions}
-    # Only the most reliable structured sources are promoted directly.
-    trusted_sources = {"title", "chapter"}
+    # Structured sources with explicit venue names (not free-text comments).
+    trusted_sources = {"title", "chapter", "description_timestamp"}
     conf_map = {"very_high": 0.85, "high": 0.80}
 
     rubrica = channel_rubriche[0] if channel_rubriche else ""
@@ -237,6 +238,43 @@ def _norm_confidence(x: object) -> float:
         return 0.55
 
 
+def _merge_extraction_rows(
+    ner_rows: list[dict],
+    discovery_rows: list[dict],
+) -> list[dict]:
+    """Merge NER pipeline rows with holistic LLM discovery; keep best confidence per name."""
+    merged: dict[str, dict] = {}
+    for row in ner_rows + discovery_rows:
+        norm = _normalize_name(row.get("locale_name", ""))
+        if not norm:
+            continue
+        prev = merged.get(norm)
+        if prev is None or float(row.get("confidence", 0)) > float(prev.get("confidence", 0)):
+            merged[norm] = row
+            continue
+        # Same venue: prefer row with more detail
+        if len(str(row.get("notes") or "")) > len(str(prev.get("notes") or "")):
+            merged[norm] = {**prev, **{k: v for k, v in row.items() if v}}
+
+    # Fuzzy merge near-duplicates (e.g. "Da Remo" vs "Pizzeria Da Remo")
+    keys = list(merged.keys())
+    drop: set[str] = set()
+    for i, a in enumerate(keys):
+        if a in drop:
+            continue
+        for b in keys[i + 1 :]:
+            if b in drop:
+                continue
+            if fuzz.ratio(a, b) >= 88 or a in b or b in a:
+                ra, rb = merged[a], merged[b]
+                if float(ra.get("confidence", 0)) >= float(rb.get("confidence", 0)):
+                    drop.add(b)
+                else:
+                    drop.add(a)
+                    break
+    return [merged[k] for k in merged if k not in drop]
+
+
 def extract_from_video(
     video_id: str,
     chunks: list[dict],
@@ -258,6 +296,19 @@ def extract_from_video(
     # by run_pipeline into video_intel.venue_hints — nothing more to do here.
     channel_rubriche = channel_rubriche or []
     llm = get_llm()
+    chapters = (youtube_extra or {}).get("chapters") if youtube_extra else None
+
+    # Holistic pass first: chapter/description-guided structured extraction.
+    discovery_rows: list[dict] = []
+    if llm and transcript:
+        discovery_rows = discover_venues_llm(
+            llm,
+            transcript=transcript,
+            video_title=video_title,
+            video_description=video_description,
+            video_intel=video_intel,
+            chapters=chapters,
+        )
 
     # Accumulate positive visit hits per normalized name: list of dict records
     visit_hits: list[dict] = []
@@ -398,6 +449,8 @@ def extract_from_video(
         extractions.append(best["row"])
 
     _promote_venue_hints(video_intel, channel_rubriche, extractions, flagged)
+
+    extractions = _merge_extraction_rows(extractions, discovery_rows)
 
     # Threshold split
     hi: list[dict] = []
