@@ -20,6 +20,8 @@ from thefuzz import fuzz
 from scripts.schemas import VideoStatus
 from scripts.utils import setup_logging
 
+from scripts.manual_edits import MIN_PUBLISH_OSM_SCORE
+
 logger = setup_logging("pipeline_exec")
 
 LogFn = Callable[[str], None]
@@ -59,6 +61,28 @@ def _is_trusted(ext: dict, trusted_names: set[str]) -> bool:
         if fuzz.ratio(name_lower, tn) >= 70 or tn in name_lower or name_lower in tn:
             return True
     return False
+
+
+def _publishable_extraction(ext: dict, trusted: set[str]) -> tuple[bool, str]:
+    """Return (True, '') if extraction may become a published visit."""
+    if _is_trusted(ext, trusted):
+        lat, lon = ext.get("lat"), ext.get("lon")
+        if (lat in (None, 0, 0.0) or lon in (None, 0, 0.0)) and not ext.get("osm_verified"):
+            return False, "trusted_no_coords"
+        return True, ""
+
+    if not ext.get("osm_verified"):
+        return False, "osm_not_found"
+
+    score = int(ext.get("osm_match_score") or 0)
+    if score < MIN_PUBLISH_OSM_SCORE:
+        return False, f"osm_weak_match_{score}"
+
+    lat, lon = ext.get("lat"), ext.get("lon")
+    if lat in (None, 0, 0.0) or lon in (None, 0, 0.0):
+        return False, "missing_coords"
+
+    return True, ""
 
 
 def finalize_video(job: FinalizeJob, log: LogFn | None = None) -> FinalizeResult:
@@ -106,6 +130,21 @@ def finalize_video(job: FinalizeJob, log: LogFn | None = None) -> FinalizeResult
                     e["_flag_reason"] = "osm_not_found"
                     flagged_extractions.append(e)
             extractions = verified
+
+        publishable: list[dict] = []
+        for e in extractions:
+            ok_pub, why = _publishable_extraction(e, trusted)
+            if ok_pub:
+                publishable.append(e)
+            else:
+                fe = dict(e)
+                fe["confidence"] = min(float(fe.get("confidence", 0.5)), 0.45)
+                fe["_flag_reason"] = why
+                flagged_extractions.append(fe)
+                _log(
+                    f"  [{job.video_id}] Non pubblicato '{e.get('locale_name')}': {why}"
+                )
+        extractions = publishable
 
         if extractions:
             _log(f"  [{job.video_id}] Deduplicating…")

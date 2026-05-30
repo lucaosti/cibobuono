@@ -41,6 +41,7 @@ from scripts.review_queue import (
     resolve_review,
     visits_with_links,
 )
+from scripts.manual_edits import add_manual_visit, list_visits, remove_visit
 
 _STATIC_HTML = Path(__file__).parent / "static" / "dashboard.html"
 
@@ -73,6 +74,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(dashboard_hardware())
         elif path == "/api/review":
             self._json({"items": pending_reviews(limit=80)})
+        elif path == "/api/visits":
+            from urllib.parse import parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            vid = (qs.get("video_id") or [""])[0]
+            self._json({"items": list_visits(limit=150, video_id=vid)})
         elif path == "/api/reports":
             self._json(
                 {
@@ -134,9 +140,45 @@ class _Handler(BaseHTTPRequestHandler):
                     notes=str(body.get("notes", "")),
                 )
                 if not ok:
+                    self._json({"error": msg}, status=400)
+                    return
+                self._json({"ok": True, "message": msg})
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+            return
+
+        if path == "/api/visits/remove":
+            try:
+                ok, msg = remove_visit(
+                    str(body.get("visit_id", "")),
+                    hide_locale=bool(body.get("hide_locale")),
+                    reason=str(body.get("reason", "")),
+                )
+                if not ok:
                     self._json({"error": msg}, status=404)
                     return
                 self._json({"ok": True, "message": msg})
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+            return
+
+        if path == "/api/visits/add":
+            try:
+                ok, msg, visit = add_manual_visit(
+                    locale_name=str(body.get("locale_name", "")),
+                    video_id=str(body.get("video_id", "")),
+                    timestamp_start=str(body.get("timestamp_start", "0:00")),
+                    timestamp_end=str(body.get("timestamp_end", "1:30")),
+                    city=str(body.get("city", "")),
+                    address=str(body.get("address", "")),
+                    rating=body.get("rating") or None,
+                    notes=str(body.get("notes", "")),
+                    require_osm=body.get("require_osm", True) is not False,
+                )
+                if not ok:
+                    self._json({"error": msg}, status=400)
+                    return
+                self._json({"ok": True, "message": msg, "visit": visit})
             except Exception as e:
                 self._json({"error": str(e)}, status=500)
             return

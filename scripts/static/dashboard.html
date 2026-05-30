@@ -228,6 +228,7 @@ textarea.editor {
   <nav class="nav">
     <button data-page="monitor" class="active">📊 Monitor</button>
     <button data-page="review">🔍 Revisione <span class="badge" id="badge-review" hidden>0</span></button>
+    <button data-page="corrections">✏️ Correzioni</button>
     <button data-page="reports">🚩 Segnalazioni <span class="badge" id="badge-reports" hidden>0</span></button>
     <button data-page="control">⚙️ Controllo</button>
     <button data-page="data">📝 Dati JSON</button>
@@ -309,7 +310,7 @@ textarea.editor {
 <section id="page-review" class="page">
   <div class="page-header">
     <h2>Revisione incertezze</h2>
-    <p>Segmenti in <code>flagged_segments.json</code> da confermare o scartare manualmente.</p>
+    <p>Segmenti in <code>flagged_segments.json</code> da confermare o scartare. <strong>✓ OK</strong> crea una visita verificata (geocode + OSM).</p>
   </div>
   <div class="card grid-wide">
     <div style="overflow-x:auto">
@@ -317,6 +318,40 @@ textarea.editor {
         <tbody id="review_table"></tbody></table>
     </div>
     <p class="msg" id="review_feedback"></p>
+  </div>
+</section>
+
+<!-- CORRECTIONS -->
+<section id="page-corrections" class="page">
+  <div class="page-header">
+    <h2>Correzioni manuali</h2>
+    <p>Rimuovi visite sbagliate o aggiungi locali veri. Le aggiunte passano geocoding + verifica OpenStreetMap.</p>
+  </div>
+  <div class="card grid-wide" style="margin-bottom:1rem">
+    <h3>Aggiungi locale / visita</h3>
+    <div class="form-grid">
+      <div><label>Nome locale *</label><input type="text" id="add_name" placeholder="Pizzeria Da Remo"/></div>
+      <div><label>Video ID *</label><input type="text" id="add_video_id" placeholder="dQw4w9WgXcQ"/></div>
+      <div><label>Città</label><input type="text" id="add_city" placeholder="Roma"/></div>
+      <div><label>Minuto (MM:SS) *</label><input type="text" id="add_timestamp" placeholder="12:30" value="0:00"/></div>
+      <div><label>Voto</label><input type="text" id="add_rating" placeholder="8"/></div>
+      <div class="full"><label>Note</label><textarea id="add_notes" rows="2" placeholder="Opzionale"></textarea></div>
+    </div>
+    <div class="btn-row">
+      <button class="primary" id="btn_add_visit">Aggiungi visita verificata</button>
+    </div>
+    <p class="msg" id="corrections_add_feedback"></p>
+  </div>
+  <div class="card grid-wide">
+    <div class="btn-row">
+      <label>Filtra video: <input type="text" id="filter_video_id" placeholder="video_id" style="width:12rem"/></label>
+      <button id="btn_load_visits">Aggiorna elenco</button>
+    </div>
+    <div style="overflow-x:auto;margin-top:.75rem">
+      <table><thead><tr><th>Locale</th><th>Città</th><th>Video</th><th>Min.</th><th>Conf.</th><th>Link</th><th>Azioni</th></tr></thead>
+        <tbody id="corrections_table"></tbody></table>
+    </div>
+    <p class="msg" id="corrections_feedback"></p>
   </div>
 </section>
 
@@ -421,6 +456,7 @@ document.querySelectorAll('.nav button').forEach(btn => {
     btn.classList.add('active');
     $('page-' + btn.dataset.page).classList.add('active');
     if (btn.dataset.page === 'review') loadReview();
+    if (btn.dataset.page === 'corrections') loadCorrections();
     if (btn.dataset.page === 'reports') loadReports();
     if (btn.dataset.page === 'data' && !$('data_file').options.length) loadDataFiles();
   };
@@ -601,6 +637,76 @@ async function loadReview() {
     });
   } catch(e) { setMsg('review_feedback', e.message, false); }
 }
+
+async function loadCorrections() {
+  const vid = $('filter_video_id').value.trim();
+  const q = vid ? '?video_id=' + encodeURIComponent(vid) : '';
+  try {
+    const r = await api('/api/visits' + q);
+    const tb = $('corrections_table');
+    tb.innerHTML = '';
+    if (!r.items || !r.items.length) {
+      tb.innerHTML = '<tr><td colspan="7" class="empty">Nessuna visita nel database</td></tr>';
+      return;
+    }
+    r.items.forEach(v => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td><strong>${v.locale_name||'?'}</strong><br><span style="font-size:.72rem;color:var(--muted)">${v.visit_id||''}</span></td>
+        <td>${v.city||'—'}</td>
+        <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${v.video_title||''}">${v.video_id||'—'}</td>
+        <td>${v.timestamp_start||'—'}</td>
+        <td class="${confClass(v.confidence)}">${confPct(v.confidence)}</td>
+        <td>${ytLink(v.youtube_url, '▶')}</td>
+        <td>
+          <button class="sm danger" data-rm="${v.visit_id}">Rimuovi</button>
+          <button class="sm" data-hide="${v.visit_id}" title="Rimuovi visita e nascondi locale ovunque">+ Nascondi</button>
+        </td>`;
+      tb.appendChild(tr);
+    });
+    tb.querySelectorAll('button[data-rm]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Rimuovere questa visita?')) return;
+        try {
+          await api('/api/visits/remove', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ visit_id: btn.dataset.rm }) });
+          setMsg('corrections_feedback', 'Visita rimossa', true);
+          loadCorrections(); poll();
+        } catch(e) { setMsg('corrections_feedback', e.message, false); }
+      };
+    });
+    tb.querySelectorAll('button[data-hide]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Rimuovere visita e nascondere il locale dal sito?')) return;
+        try {
+          await api('/api/visits/remove', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ visit_id: btn.dataset.hide, hide_locale: true, reason: 'Correzione dashboard' }) });
+          setMsg('corrections_feedback', 'Visita rimossa e locale nascosto', true);
+          loadCorrections(); poll();
+        } catch(e) { setMsg('corrections_feedback', e.message, false); }
+      };
+    });
+  } catch(e) { setMsg('corrections_feedback', e.message, false); }
+}
+
+$('btn_load_visits').onclick = () => loadCorrections();
+$('btn_add_visit').onclick = async () => {
+  try {
+    const r = await api('/api/visits/add', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        locale_name: $('add_name').value.trim(),
+        video_id: $('add_video_id').value.trim(),
+        city: $('add_city').value.trim(),
+        timestamp_start: $('add_timestamp').value.trim() || '0:00',
+        rating: $('add_rating').value.trim() || null,
+        notes: $('add_notes').value.trim(),
+        require_osm: true,
+      }),
+    });
+    setMsg('corrections_add_feedback', r.message, true);
+    loadCorrections(); poll();
+  } catch(e) { setMsg('corrections_add_feedback', e.message, false); }
+};
 
 async function pollHardware() {
   try {

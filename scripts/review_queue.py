@@ -82,7 +82,17 @@ def resolve_review(
     locale_name: str | None = None,
     notes: str = "",
 ) -> tuple[bool, str]:
-    """Mark a flagged segment reviewed; optionally hide locale via corrections."""
+    """Mark a flagged segment reviewed; approve creates a verified visit."""
+    if action == "approve":
+        from scripts.manual_edits import promote_flagged_to_visit
+
+        return promote_flagged_to_visit(
+            video_id=video_id,
+            timestamp_start=timestamp_start,
+            locale_name=locale_name,
+            notes=notes,
+        )
+
     flagged = load_json(FLAGGED_SEGMENTS_JSON)
     found = False
     target_name = locale_name
