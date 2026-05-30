@@ -93,8 +93,16 @@ install_system_deps() {
 }
 
 has_cuda() {
-  command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null
+  # nvidia-smi is the cleanest signal but is often absent even when the driver
+  # and toolkit are installed (headless boxes), so probe several sources.
+  command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null && return 0
+  [[ -e /dev/nvidia0 ]] && return 0
+  [[ -f /proc/driver/nvidia/version ]] && return 0
+  command -v lspci &>/dev/null && lspci 2>/dev/null | grep -qi 'nvidia' && return 0
+  return 1
 }
+
+has_nvcc() { command -v nvcc &>/dev/null; }
 
 # ── Venv + pip ───────────────────────────────────────────────────────────────
 
@@ -112,17 +120,28 @@ setup_venv() {
   python -m pip install -r "$REPO/requirements.txt" -q
   python -m pip install huggingface_hub -q
 
+  # PyTorch: the default PyPI wheel already bundles CUDA on Linux, so a plain
+  # install gives GPU-enabled torch (used by GLiNER/transformers).
+  python -c "import torch" 2>/dev/null || python -m pip install torch -q || true
+
   if has_cuda; then
-    log "NVIDIA GPU detected — installing llama-cpp-python with CUDA…"
-    if ! python -c "import llama_cpp" 2>/dev/null; then
-      CMAKE_ARGS="-DGGML_CUDA=on" python -m pip install llama-cpp-python --no-cache-dir -q \
-        || warn "CUDA llama-cpp build failed; falling back to wheel"
+    # Is llama-cpp-python already a CUDA build? (requirements.txt pulls a
+    # CPU-only wheel, so we usually need to rebuild it here.)
+    local gpu_ok
+    gpu_ok="$(python -c 'from llama_cpp import llama_cpp as c; print(c.llama_supports_gpu_offload())' 2>/dev/null || echo False)"
+    if [[ "$gpu_ok" == "True" ]]; then
+      log "llama-cpp-python already supports GPU offload."
+    elif has_nvcc; then
+      log "NVIDIA GPU + nvcc detected — building llama-cpp-python with CUDA (this can take a few minutes)…"
+      CMAKE_ARGS="-DGGML_CUDA=on" python -m pip install llama-cpp-python \
+        --no-cache-dir --force-reinstall --no-binary llama-cpp-python -q \
+        && log "CUDA llama-cpp built." \
+        || warn "CUDA llama-cpp build failed; LLM will run on CPU. Check CUDA toolkit."
+    else
+      warn "NVIDIA GPU present but nvcc missing — install 'nvidia-cuda-toolkit' to enable GPU LLM. LLM runs on CPU for now."
     fi
-    python -m pip install torch --index-url https://download.pytorch.org/whl/cu124 -q \
-      2>/dev/null || python -m pip install torch -q
   else
-    log "No NVIDIA GPU — CPU/MPS wheels."
-    python -m pip install torch -q 2>/dev/null || true
+    log "No NVIDIA GPU — CPU/MPS llama-cpp wheel is fine."
   fi
 }
 
