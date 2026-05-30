@@ -37,11 +37,19 @@ class TestLoadJson:
         assert result == []
 
     def test_load_dict_returns_empty(self, tmp_path):
-        """load_json expects arrays, dicts return empty list."""
+        """Plain dicts (not paged sentinel) return empty list."""
         path = tmp_path / "dict.json"
         path.write_text('{"key": "value"}', encoding="utf-8")
         result = load_json(path)
         assert result == []
+
+    def test_load_paged_sentinel(self, tmp_path):
+        path = tmp_path / "visits.json"
+        path.write_text('{"_pages": 2}', encoding="utf-8")
+        (tmp_path / "visits_0.json").write_text('[{"id": "a"}]', encoding="utf-8")
+        (tmp_path / "visits_1.json").write_text('[{"id": "b"}, {"id": "c"}]', encoding="utf-8")
+        result = load_json(path)
+        assert result == [{"id": "a"}, {"id": "b"}, {"id": "c"}]
 
 
 class TestSaveJson:

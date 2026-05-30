@@ -25,6 +25,9 @@ gliner>=0.2.0
 # Geocoding (open source, no API key)
 geopy>=2.4.0
 
+# Model downloads (setup_models.py)
+huggingface_hub>=0.23.0
+
 # Fuzzy string matching (deduplication)
 thefuzz[speedup]>=0.22.0
 

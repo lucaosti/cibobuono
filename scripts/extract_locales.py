@@ -10,7 +10,10 @@ __author__ = "Luca Ostinelli"
 
 
 import json
+import os
 import re
+
+from thefuzz import fuzz
 
 from scripts.hardware import get_profile
 from scripts.utils import (
@@ -18,6 +21,7 @@ from scripts.utils import (
     LLM_CONTEXT_SIZE,
     LLM_MAX_TOKENS,
     LLM_TEMPERATURE,
+    MODELS_DIR,
     resolve_llm_model_path,
     setup_logging,
 )
@@ -28,8 +32,23 @@ logger = setup_logging("extract")
 _llm_instance = None
 
 
+def _should_abort() -> bool:
+    """Honour a pipeline graceful-shutdown request while waiting for headroom."""
+    try:
+        from scripts.run_pipeline import _pipeline_shutdown
+
+        return bool(_pipeline_shutdown.get("graceful"))
+    except Exception:
+        return False
+
+
 def get_llm():
-    """Load and cache the LLM model with hardware-optimal settings.
+    """Load and cache the LLM model with hardware-optimal, *runtime-adaptive* settings.
+
+    The static :class:`~scripts.hardware.DeviceProfile` says what the machine
+    *could* run; :mod:`scripts.resource_monitor` decides what actually fits the
+    free RAM / VRAM right now (waiting briefly for headroom, then downgrading to
+    a smaller GGUF if needed) so we never push the OS into swap or a GPU OOM.
 
     Returns ``None`` (without errors) when the detected hardware profile has
     ``enable_llm=False`` — typically a Raspberry Pi Zero / Pi 3 / very small VM.
@@ -57,34 +76,50 @@ def get_llm():
         )
         return None
 
-    model_path = resolve_llm_model_path()
-    if model_path is None:
+    from scripts import resource_monitor as rm
+
+    # If the user pinned a specific model, respect it; otherwise let the
+    # resource monitor choose the largest GGUF that currently fits free memory.
+    pinned = resolve_llm_model_path() if os.environ.get("CIBOBUONO_LLM_MODEL") else None
+    if pinned is not None:
+        models = [(pinned, pinned.stat().st_size / (1024**3))]
+    else:
+        models = rm.list_gguf_models(MODELS_DIR)
+
+    if not models:
         logger.error(
-            f"No GGUF model found. Set CIBOBUONO_LLM_MODEL to a file path, "
-            f"or add *.gguf under models/. "
-            f"Recommended filename: see LLM_MODEL_FILENAME in scripts/utils.py."
+            "No GGUF model found. Set CIBOBUONO_LLM_MODEL to a file path, "
+            "or add *.gguf under models/. "
+            "Recommended filename: see LLM_MODEL_FILENAME in scripts/utils.py."
         )
         return None
+
+    plan = rm.plan_llm_load(profile, models, should_abort=_should_abort)
+    if plan.model_path is None:
+        logger.error("No loadable GGUF model: %s", plan.note)
+        return None
+
+    model_path = plan.model_path
 
     # Honor the project-wide LLM_CONTEXT_SIZE when the profile allows a larger
     # context than the default; otherwise clamp down (Pi-class hardware).
     n_ctx = min(LLM_CONTEXT_SIZE, profile.n_ctx) if profile.n_ctx else LLM_CONTEXT_SIZE
-    logger.info(f"Loading LLM model: {model_path.name}")
+    logger.info("Loading LLM model: %s (%.1f GB) — %s", model_path.name, plan.size_gb, plan.note)
     logger.info(
-        "  Hardware config: platform=%s, threads=%d, gpu_layers=%d, batch=%d, "
-        "ctx=%d, mlock=%s, metal=%s, cuda=%s",
-        profile.platform.value, profile.n_threads, profile.n_gpu_layers,
-        profile.n_batch, n_ctx, profile.use_mlock, profile.has_metal,
-        profile.has_cuda,
+        "  Runtime config: platform=%s, threads=%d, gpu_layers=%d (ceiling %d), "
+        "batch=%d, ctx=%d, mlock=%s, pool=%s, metal=%s, cuda=%s",
+        profile.platform.value, profile.n_threads, plan.n_gpu_layers,
+        profile.n_gpu_layers, profile.n_batch, n_ctx, plan.use_mlock,
+        plan.pool, profile.has_metal, profile.has_cuda,
     )
 
     llm_kwargs: dict = {
         "model_path": str(model_path),
         "n_ctx": n_ctx,
-        "n_gpu_layers": profile.n_gpu_layers,
+        "n_gpu_layers": plan.n_gpu_layers,
         "n_threads": profile.n_threads,
         "n_batch": profile.n_batch,
-        "use_mlock": profile.use_mlock,
+        "use_mlock": plan.use_mlock,
         "use_mmap": profile.use_mmap,
         "verbose": False,
     }
@@ -303,7 +338,6 @@ def find_best_timestamp_in_transcript(
                 return seg_start
 
         if name_tokens:
-            from thefuzz import fuzz
             matched = 0
             for token in name_tokens:
                 for word in seg_text.split():

@@ -42,6 +42,8 @@ import signal
 import sys
 from datetime import datetime, timezone
 
+from thefuzz import fuzz
+
 from scripts.chunk_transcription import seconds_to_timestamp as _stt
 from scripts.dashboard import Dashboard
 from scripts.hardware import get_profile
@@ -144,26 +146,16 @@ def run_pipeline(
         _pipeline_shutdown["graceful"] = False
         _install_pipeline_signal_handlers()
 
+    # Yield CPU to interactive work; keeps the OS responsive on shared machines.
+    from scripts import resource_monitor as rm
+    rm.apply_friendly_priority()
+
     # ── Hardware profile + auto-select models ─────────────────────────
+    # get_profile() already logs the detected capacity once; no need to repeat it.
     from scripts.utils import select_optimal_models
 
     profile = get_profile()
-    logger.info(
-        "Hardware: %s (%s, %dP+%dE cores, %.1f GB RAM%s); "
-        "Whisper=%s (%s,%s); LLM tier=%s (n_gpu_layers=%d, n_threads=%d)",
-        profile.platform.value,
-        profile.machine,
-        profile.cpu_perf_cores,
-        max(0, profile.cpu_count_physical - profile.cpu_perf_cores),
-        profile.total_ram_gb,
-        f", virt={profile.virt_type}" if profile.is_virtual else "",
-        profile.whisper_model,
-        profile.whisper_device,
-        profile.whisper_compute_type,
-        profile.llm_tier,
-        profile.n_gpu_layers,
-        profile.n_threads,
-    )
+    logger.info("Live resources at start: %s", rm.snapshot(include_gpu=profile.has_cuda).summary())
 
     if auto_models:
         selected = select_optimal_models()
@@ -328,6 +320,19 @@ def run_pipeline(
                 stopped_gracefully = True
                 _log("Graceful shutdown: not starting another video")
                 break
+
+            # Back-pressure: before taking on another (heavy) video, make sure
+            # the system isn't already saturated. Wait briefly for it to calm
+            # down; if it doesn't, proceed anyway (the per-model loaders apply
+            # their own adaptive limits) rather than stalling forever.
+            stressed, why = rm.under_pressure(include_gpu=profile.has_cuda)
+            if stressed:
+                _log(f"  System under pressure ({why}); pausing before next video…")
+                rm.wait_until_calm(
+                    include_gpu=profile.has_cuda,
+                    should_abort=lambda: _pipeline_shutdown["graceful"],
+                )
+
             recap: dict = {
                 "video_id": video["video_id"],
                 "title": (video.get("title") or "")[:200],
@@ -606,7 +611,6 @@ def run_pipeline(
                             trusted_venue_names.add(hint["name"].lower().strip())
 
                 def _is_trusted(ext: dict) -> bool:
-                    from thefuzz import fuzz
                     name_lower = ext.get("locale_name", "").lower().strip()
                     for tn in trusted_venue_names:
                         if fuzz.ratio(name_lower, tn) >= 70 or tn in name_lower or name_lower in tn:

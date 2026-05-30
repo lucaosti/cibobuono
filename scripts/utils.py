@@ -143,12 +143,28 @@ def setup_logging(name: str = "pipeline") -> logging.Logger:
 
 
 def load_json(path: Path) -> list:
-    """Load a JSON file, returning empty list if file doesn't exist or is empty."""
+    """Load a JSON list, transparently reassembling paged files written by
+    :func:`save_json_split` (sentinel ``{"_pages": N}`` + ``stem_0.json`` …)."""
     if not path.exists():
         return []
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if isinstance(data, dict) and "_pages" in data:
+            n = int(data["_pages"])
+            merged: list = []
+            for i in range(n):
+                chunk_path = path.parent / f"{path.stem}_{i}.json"
+                if not chunk_path.exists():
+                    logging.getLogger("utils").warning(
+                        "Missing page %s for %s", chunk_path.name, path.name
+                    )
+                    continue
+                with open(chunk_path, "r", encoding="utf-8") as cf:
+                    chunk = json.load(cf)
+                if isinstance(chunk, list):
+                    merged.extend(chunk)
+            return merged
         return data if isinstance(data, list) else []
     except json.JSONDecodeError as e:
         logging.getLogger("utils").warning(f"Corrupted JSON in {path}: {e}")
@@ -300,19 +316,9 @@ def detect_hardware() -> dict:
     }
 
 
-# LLM tier definitions — single source of truth. Mirrored in
-# scripts/hardware.py::LLM_TIERS to keep the standalone profile detector
-# self-contained.
-LLM_TIER_CANDIDATES: tuple[tuple[str, float], ...] = (
-    ("72B", 40),
-    ("70B", 40),
-    ("32B", 24),
-    ("27B", 20),
-    ("14B", 12),
-    ("8B", 6),
-    ("3B", 3),
-    ("1B", 1.5),
-)
+# LLM tier definitions — single source of truth lives in scripts.hardware.
+# Re-exported here under the legacy name so existing imports keep working.
+from .hardware import LLM_TIERS as LLM_TIER_CANDIDATES  # noqa: E402
 
 
 def resolve_llm_model_path_for_tier(tier: str) -> Optional[Path]:

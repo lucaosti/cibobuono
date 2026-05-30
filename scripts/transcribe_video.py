@@ -265,6 +265,20 @@ def _get_whisper_model(model_name: str = WHISPER_DEFAULT_MODEL):
     download_root = str(MODELS_DIR / "whisper")
     profile = get_profile()
 
+    # Runtime governance: pause if the system is under pressure, then pick a
+    # Whisper size that fits the memory that's actually free right now (VRAM on
+    # CUDA, RAM otherwise). Quality stays first: we only ever downgrade when the
+    # requested model genuinely won't fit.
+    from scripts import resource_monitor as rm
+
+    rm.wait_until_calm(include_gpu=profile.whisper_device == "cuda")
+    fitted, note = rm.fit_whisper_model(profile, model_name)
+    if fitted != model_name:
+        logger.warning("Whisper model selection: %s", note)
+        model_name = fitted
+    else:
+        logger.info("Whisper model selection: %s", note)
+
     # faster-whisper has no Metal backend: on Apple Silicon we run CPU + int8.
     # On CUDA we use fp16 (or int8_float16 for small VRAM, picked in hardware.py).
     fw_device = profile.whisper_device

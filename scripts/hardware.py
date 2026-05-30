@@ -22,6 +22,13 @@ Best-practice references baked into the heuristics:
 
 Detection avoids spawning subprocesses where possible (uses ctypes / sysfs /
 procfs) so the profile cost is negligible at startup.
+
+Scope: this module reports the machine's *total capacity* and the best
+parameters that capacity could ever support. It is cached once per process and
+never changes. The *live* allocation — choosing what to load given how much RAM
+/ VRAM is free right now, throttling under pressure, dropping process priority —
+is handled by :mod:`scripts.resource_monitor`, which treats the values here as
+ceilings.
 """
 
 from __future__ import annotations
@@ -284,14 +291,6 @@ def _detect_cuda() -> tuple[bool, str | None, float | None]:
 
     return False, None, None
 
-    # (unreachable — kept for structural symmetry with old code)
-    try:
-        vram_mb = 0.0  # type: ignore[assignment]
-        vram_gb = None
-    except ValueError:
-        vram_gb = None
-    return True, name, vram_gb
-
 
 def _detect_rocm() -> tuple[bool, str | None, float | None]:
     """Best-effort ROCm detection on Linux."""
@@ -315,7 +314,8 @@ def _detect_rocm() -> tuple[bool, str | None, float | None]:
                     m = re.search(r"vram.*Total.*:\s*(\d+)", line, re.IGNORECASE)
                     if m:
                         vram_gb = round(int(m.group(1)) / (1024**3), 2)
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        except Exception:
+            # rocm-smi missing/older format/timeout — VRAM stays unknown.
             pass
         return True, name, vram_gb
     return False, None, None
@@ -609,7 +609,8 @@ def _derive_params(
 
 
 # (filename_fragment, min_ram_gb).  Larger model first so we pick the best
-# that fits.  Mirrors select_optimal_models() in scripts/utils.py.
+# that fits.  Single source of truth — re-exported by scripts.utils as
+# LLM_TIER_CANDIDATES for legacy callers.
 LLM_TIERS: tuple[tuple[str, float], ...] = (
     ("72B", 40),
     ("70B", 40),

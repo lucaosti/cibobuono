@@ -15,6 +15,8 @@ import re
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
+from thefuzz import fuzz
+
 from scripts.chunk_transcription import seconds_to_timestamp
 from scripts.extract_locales import (
     LLM_MAX_TOKENS,
@@ -75,7 +77,6 @@ def _label_to_category(label: str) -> list[str]:
 def _is_protected_name(name: str, video_intel: VideoIntel | None) -> bool:
     if not video_intel or not video_intel.venue_hints:
         return False
-    from thefuzz import fuzz
 
     nl = name.lower().strip()
     for h in video_intel.venue_hints:
@@ -91,7 +92,6 @@ def _chapter_start_time(name: str, video_intel: VideoIntel | None) -> float | No
     """Return the chapter start_time for a matched venue hint, if available."""
     if not video_intel or not video_intel.venue_hints:
         return None
-    from thefuzz import fuzz
 
     nl = name.lower().strip()
     best: float | None = None
