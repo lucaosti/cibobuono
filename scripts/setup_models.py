@@ -172,6 +172,9 @@ def download_ner() -> None:
         from gliner import GLiNER
     except ImportError as exc:
         raise SystemExit("gliner not installed. pip install gliner transformers torch") from exc
+    from scripts.ner_candidates import _patch_gliner_tokenizer
+
+    _patch_gliner_tokenizer()
     GLiNER.from_pretrained(NER_MODEL_NAME)
     logger.info("NER model cached (Hugging Face hub cache)")
 
@@ -194,9 +197,12 @@ def verify_assets(*, models_dir: Path = MODELS_DIR) -> list[str]:
 
     try:
         from gliner import GLiNER
+        from scripts.ner_candidates import _patch_gliner_tokenizer
+
+        _patch_gliner_tokenizer()
         GLiNER.from_pretrained(NER_MODEL_NAME)
-    except ImportError:
-        issues.append("gliner not installed")
+    except ImportError as exc:
+        issues.append(f"gliner import failed: {exc}")
     except Exception as exc:
         issues.append(f"NER model {NER_MODEL_NAME} not ready: {exc}")
 

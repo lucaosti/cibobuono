@@ -120,6 +120,49 @@ def _char_span_to_start_time(
     return fallback
 
 
+def _patch_gliner_tokenizer() -> None:
+    """Avoid GLiNER eager-loading mecab/janome/jieba at init (breaks on minimal installs).
+
+    Italian food vlogs only need langdetect + whitespace fallback for token spans.
+    """
+    try:
+        from gliner.data_processing import tokenizer as gt
+    except ImportError:
+        return
+    if getattr(gt, "_cibobuono_patched", False):
+        return
+
+    class _ItalianMultiLangSplitter(gt.TokenSplitterBase):
+        def __init__(self, logging: bool = False, use_spacy: bool = True):
+            if not gt.is_module_available("langdetect"):
+                raise ImportError("Please install langdetect with: `pip install langdetect`")
+            from langdetect import DetectorFactory, detect
+
+            DetectorFactory.seed = 0
+            self.detect = detect
+            self.lang2splitter: dict = {}
+            self.universal_splitter = gt.WhitespaceTokenSplitter()
+            self.logging = logging
+
+        def __call__(self, text):
+            lang = "unknown"
+            splitter = self.universal_splitter
+            try:
+                lang = self.detect(text)
+            except Exception:
+                pass
+            else:
+                splitter = self.lang2splitter.get(lang, self.universal_splitter)
+                if lang not in self.lang2splitter:
+                    self.lang2splitter[lang] = splitter
+            if self.logging and lang != "unknown":
+                logger.debug(f"GLiNER tokenizer lang={lang}")
+            yield from splitter(text)
+
+    gt.MultiLangWordsSplitter = _ItalianMultiLangSplitter  # type: ignore[misc,assignment]
+    gt._cibobuono_patched = True
+
+
 def get_gliner():
     """Lazy-load GLiNER model (cached process-wide)."""
     global _gliner_model
@@ -131,6 +174,7 @@ def get_gliner():
         logger.warning("gliner not installed; using heuristic NER fallback only")
         return None
     try:
+        _patch_gliner_tokenizer()
         logger.info(f"Loading GLiNER model: {NER_MODEL_NAME}")
         _gliner_model = GLiNER.from_pretrained(NER_MODEL_NAME)
         return _gliner_model
