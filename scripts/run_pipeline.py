@@ -85,8 +85,9 @@ _prefetch_executor: ThreadPoolExecutor | None = None
 def _prefetch_pool() -> ThreadPoolExecutor:
     global _prefetch_executor
     if _prefetch_executor is None:
+        workers = int(os.environ.get("CIBOBUONO_IO_WORKERS", "4"))
         _prefetch_executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="prefetch"
+            max_workers=max(2, workers), thread_name_prefix="prefetch"
         )
     return _prefetch_executor
 
@@ -149,6 +150,7 @@ def run_pipeline(
     max_videos: int = 100,
     no_dashboard: bool = False,
     auto_models: bool = True,
+    parallel_postprocess: bool | None = None,
     _external_setup: bool = False,
 ):
     """
@@ -181,6 +183,15 @@ def run_pipeline(
 
     profile = get_profile()
     logger.info("Live resources at start: %s", rm.snapshot(include_gpu=profile.has_cuda).summary())
+
+    if parallel_postprocess is None:
+        from scripts.pipeline_executor import parallel_postprocess_enabled
+
+        parallel_postprocess = parallel_postprocess_enabled(profile.has_cuda)
+    if parallel_postprocess and profile.has_cuda:
+        logger.info(
+            "Parallel postprocess enabled — geocode/OSM runs while GPU processes next video"
+        )
 
     if auto_models:
         selected = select_optimal_models()
@@ -249,6 +260,7 @@ def run_pipeline(
         "started_at": datetime.now(timezone.utc).isoformat(),
         "videos": [],
     }
+    executor = None
 
     try:
         _log("Pipeline started")
@@ -336,6 +348,12 @@ def run_pipeline(
 
         stopped_gracefully = False
 
+        from scripts.pipeline_executor import FinalizeJob, PipelineExecutor
+
+        executor = PipelineExecutor(
+            parallel_postprocess=parallel_postprocess and not skip_extract,
+        )
+
         # ── Sliding window: pre-download audio for first batch ────────
         prefetch_n = min(PREFETCH_WINDOW, len(to_process))
         _log(f"Prefetch: downloading audio for first {prefetch_n} videos...")
@@ -364,6 +382,18 @@ def run_pipeline(
                 stopped_gracefully = True
                 _log("Stop richiesto dalla dashboard")
                 break
+
+            if executor:
+                for fr in executor.poll_completed():
+                    if fr.outcome == "processed":
+                        dash.tick_stat("processed")
+                    elif fr.outcome == "errored":
+                        dash.tick_stat("errored")
+                        _log(f"  ✗ Background finalize failed: {fr.error[:200]}")
+                    _refresh_stats()
+
+            if executor:
+                executor.schedule_io_prep(to_process, i - 1, count=4)
 
             if _pipeline_shutdown["graceful"]:
                 stopped_gracefully = True
@@ -533,6 +563,11 @@ def run_pipeline(
                 # Step 4: Transcribe
                 dash.set_step("Transcribe")
                 if not skip_transcribe:
+                    # Hand VRAM from LLM (previous extract/food-check) to Whisper.
+                    if profile.has_cuda:
+                        from scripts.extract_locales import release_llm
+
+                        release_llm()
                     _log("  Transcribing...")
                     from scripts.transcribe_video import transcribe_audio
                     transcript = transcribe_audio(video_id, whisper_model)
@@ -703,87 +738,52 @@ def run_pipeline(
                         if hint.get("confidence") in ("very_high", "high"):
                             trusted_venue_names.add(hint["name"].lower().strip())
 
-                def _is_trusted(ext: dict) -> bool:
-                    name_lower = ext.get("locale_name", "").lower().strip()
-                    for tn in trusted_venue_names:
-                        if fuzz.ratio(name_lower, tn) >= 70 or tn in name_lower or name_lower in tn:
-                            return True
-                    return False
+                # Steps 7–10: geocode / OSM / dedupe / populate (overlap with next GPU work)
+                finalize_job = FinalizeJob(
+                    video_id=video_id,
+                    channel_id=channel_id,
+                    publish_date=publish_date,
+                    extractions=extractions,
+                    flagged_extractions=flagged_extractions,
+                    trusted_venue_names=trusted_venue_names,
+                )
 
-                # Step 7: Geocode
-                dash.set_step("Geocode")
-                if extractions:
-                    _log(f"  Geocoding {len(extractions)} locales...")
-                    from scripts.geocode_locales import geocode_extractions
-                    geocoded, non_geocoded = geocode_extractions(extractions)
-                    for e in non_geocoded:
-                        if _is_trusted(e):
-                            _log(f"  Geocoding failed for trusted venue '{e.get('locale_name')}' — keeping with default coords")
-                            e["lat"] = 0.0
-                            e["lon"] = 0.0
-                            geocoded.append(e)
-                        else:
-                            e["confidence"] = 0.0
-                            e["_flag_reason"] = "geocoding_failed"
-                            flagged_extractions.append(e)
-                    extractions = geocoded
-                    _log(f"  Geocoded: {len(extractions)}, failed: {len(non_geocoded)}")
-
-                # Step 7b: Verify locales exist on OpenStreetMap
-                dash.set_step("Verify (OSM)")
-                if extractions:
-                    _log(f"  Verifying {len(extractions)} locales on OpenStreetMap...")
-                    from scripts.verify_locales import verify_extractions
-                    verified, not_verified = verify_extractions(extractions)
-                    for e in not_verified:
-                        if _is_trusted(e):
-                            _log(f"  OSM not found for trusted venue '{e.get('locale_name')}' — keeping anyway")
-                            e["osm_verified"] = False
-                            verified.append(e)
-                        else:
-                            e["confidence"] = 0.0
-                            e["_flag_reason"] = "osm_not_found"
-                            flagged_extractions.append(e)
-                    extractions = verified
-                    _log(f"  Verified: {len(extractions)}, not found: {len(not_verified)}")
-
-                # Step 8: Deduplicate
-                dash.set_step("Deduplicate")
-                if extractions:
-                    _log("  Deduplicating locales...")
-                    from scripts.deduplicate_locales import deduplicate_locales
-                    _, locale_mapping = deduplicate_locales(extractions)
+                if executor and executor.parallel_postprocess:
+                    dash.set_step("Finalize (background)")
+                    _log(
+                        "  Geocode/OSM/populate queued in background — "
+                        "GPU free for next video"
+                    )
+                    executor.submit_finalize(finalize_job, _log)
+                    recap["outcome"] = "processed"
+                    recap["visits_created"] = len(extractions)
+                    recap["flagged_segments"] = len(flagged_extractions)
+                    _dash_finish(
+                        "processed",
+                        visits=len(extractions),
+                        flagged=len(flagged_extractions),
+                    )
                 else:
-                    locale_mapping = []
+                    from scripts.pipeline_executor import finalize_video
 
-                # Step 9: Populate visits + flagged
-                dash.set_step("Populate")
-                _log("  Populating visits...")
-                from scripts.populate_json import populate_visits, populate_flagged
-
-                new_visits = populate_visits(
-                    locale_mapping, video_id, channel_id, publish_date
-                )
-
-                if flagged_extractions:
-                    _log(f"  Saving {len(flagged_extractions)} flagged segments...")
-                    populate_flagged(flagged_extractions, video_id, channel_id)
-
-                # Step 10: Update status
-                dash.set_step("Update status")
-                update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                _update_processed(
-                    video_id, channel_id, VideoStatus.PROCESSED,
-                    len(new_visits), len(flagged_extractions),
-                )
-
-                _log(f"  ✓ Done: {len(new_visits)} visits, {len(flagged_extractions)} flagged")
-
-                recap["outcome"] = "processed"
-                recap["visits_created"] = len(new_visits)
-                recap["flagged_segments"] = len(flagged_extractions)
-
-                _dash_finish("processed", visits=len(new_visits), flagged=len(flagged_extractions))
+                    dash.set_step("Geocode")
+                    result = finalize_video(finalize_job, _log)
+                    recap["outcome"] = result.outcome
+                    recap["visits_created"] = result.visits_created
+                    recap["flagged_segments"] = result.flagged_segments
+                    if result.outcome == "errored":
+                        dash.tick_stat("errored")
+                        _dash_finish("errored")
+                    else:
+                        _log(
+                            f"  ✓ Done: {result.visits_created} visits, "
+                            f"{result.flagged_segments} flagged"
+                        )
+                        _dash_finish(
+                            "processed",
+                            visits=result.visits_created,
+                            flagged=result.flagged_segments,
+                        )
 
                 # Sliding window: prefetch next video outside current window
                 next_prefetch = i - 1 + PREFETCH_WINDOW  # i is 1-based
@@ -793,6 +793,15 @@ def run_pipeline(
             finally:
                 recap.setdefault("outcome", "unknown")
                 run_report["videos"].append(recap)
+
+        if executor:
+            executor.drain_finalize(_log)
+            for fr in executor.poll_completed():
+                if fr.outcome == "processed":
+                    dash.tick_stat("processed")
+                elif fr.outcome == "errored":
+                    dash.tick_stat("errored")
+                _refresh_stats()
 
         run_report["finished_at"] = datetime.now(timezone.utc).isoformat()
         run_report["summary"] = {
@@ -834,6 +843,12 @@ def run_pipeline(
         _log("Pipeline complete!")
 
     finally:
+        if executor is not None:
+            executor.shutdown()
+        global _prefetch_executor
+        if _prefetch_executor is not None:
+            _prefetch_executor.shutdown(wait=False, cancel_futures=True)
+            _prefetch_executor = None
         if not _external_setup:
             _restore_pipeline_signal_handlers()
         try:
@@ -1162,6 +1177,10 @@ def main():
              f"min: {WATCH_MIN_INTERVAL_SECONDS})",
     )
     parser.add_argument(
+        "--no-parallel-postprocess", action="store_true",
+        help="Run geocode/OSM/populate synchronously (disable GPU/CPU overlap)",
+    )
+    parser.add_argument(
         "--print-hardware", action="store_true",
         help="Print the detected hardware profile (Whisper + LLM params) as JSON and exit",
     )
@@ -1223,6 +1242,7 @@ def main():
         max_videos=args.max_videos,
         no_dashboard=args.no_dashboard,
         auto_models=not args.no_auto_models,
+        parallel_postprocess=not args.no_parallel_postprocess,
     )
 
 

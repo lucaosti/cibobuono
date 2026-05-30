@@ -151,6 +151,23 @@ def get_llm():
     return _llm_instance
 
 
+def release_llm() -> None:
+    """Unload LLM from GPU/RAM so Whisper can use VRAM for the next video."""
+    global _llm_instance
+    if _llm_instance is None:
+        return
+    _llm_instance = None
+    try:
+        import gc
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    logger.info("LLM released — VRAM freed for Whisper transcription")
+
+
 # ---------------------------------------------------------------------------
 # Food-relevance gate — lightweight LLM check before extraction
 # ---------------------------------------------------------------------------
