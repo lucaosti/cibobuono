@@ -21,6 +21,7 @@ logger = setup_logging("ner_candidates")
 
 _gliner_model = None
 _gliner_predict_lock = threading.Lock()
+_gliner_load_lock = threading.Lock()
 
 # GLiNER often includes trigger words in the span; strip common Italian prefixes.
 _VENUE_PREFIX = re.compile(
@@ -195,24 +196,30 @@ def _maybe_pin_gliner_cpu(model) -> None:
 
 
 def get_gliner():
-    """Lazy-load GLiNER model (cached process-wide)."""
+    """Lazy-load GLiNER model (cached process-wide, thread-safe)."""
     global _gliner_model
     if _gliner_model is not None:
         return _gliner_model
-    try:
-        from gliner import GLiNER
-    except ImportError:
-        logger.warning("gliner not installed; using heuristic NER fallback only")
-        return None
-    try:
-        _patch_gliner_tokenizer()
-        logger.info(f"Loading GLiNER model: {NER_MODEL_NAME}")
-        _gliner_model = GLiNER.from_pretrained(NER_MODEL_NAME)
-        _maybe_pin_gliner_cpu(_gliner_model)
-        return _gliner_model
-    except Exception as e:
-        logger.warning(f"GLiNER load failed ({e}); heuristic fallback only")
-        return None
+    with _gliner_load_lock:
+        # Re-check under lock: another NER worker thread may have loaded it
+        # while we waited (avoids loading the model N times concurrently).
+        if _gliner_model is not None:
+            return _gliner_model
+        try:
+            from gliner import GLiNER
+        except ImportError:
+            logger.warning("gliner not installed; using heuristic NER fallback only")
+            return None
+        try:
+            _patch_gliner_tokenizer()
+            logger.info(f"Loading GLiNER model: {NER_MODEL_NAME}")
+            model = GLiNER.from_pretrained(NER_MODEL_NAME)
+            _maybe_pin_gliner_cpu(model)
+            _gliner_model = model
+            return _gliner_model
+        except Exception as e:
+            logger.warning(f"GLiNER load failed ({e}); heuristic fallback only")
+            return None
 
 
 # Only used when GLiNER is completely unavailable. Requires an explicit venue
