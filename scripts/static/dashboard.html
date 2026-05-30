@@ -203,7 +203,6 @@ textarea.editor {
     <button data-page="review">🔍 Revisione <span class="badge" id="badge-review" hidden>0</span></button>
     <button data-page="reports">🚩 Segnalazioni <span class="badge" id="badge-reports" hidden>0</span></button>
     <button data-page="control">⚙️ Controllo</button>
-    <button data-page="data">📝 Dati JSON</button>
   </nav>
   <div class="sidebar-footer">Pipeline food vlog · IT</div>
 </aside>
@@ -296,7 +295,7 @@ textarea.editor {
 <section id="page-reports" class="page">
   <div class="page-header">
     <h2>Segnalazioni locale sbagliato</h2>
-    <p>Segnala una citazione errata: verrà registrata e il locale nascosto.</p>
+    <p>Senza backend: le segnalazioni diventano <strong>GitHub Issues</strong>, così resta traccia pubblica sia delle mie che di quelle altrui. Vedi tutte su <a id="reports_repo_link" href="#" target="_blank" rel="noopener">GitHub</a>.</p>
   </div>
   <div class="grid">
     <div class="card">
@@ -304,17 +303,17 @@ textarea.editor {
       <div class="form-grid">
         <div class="full"><label>Nome locale</label><input type="text" id="rep_name" placeholder="Es. Pizzeria XYZ"/></div>
         <div><label>Video ID (opz.)</label><input type="text" id="rep_video" placeholder="abc123"/></div>
-        <div><label>Visit ID (opz.)</label><input type="text" id="rep_visit" placeholder="visit_..."/></div>
         <div class="full"><label>Link YouTube (opz.)</label><input type="text" id="rep_url" placeholder="https://youtu.be/...?t=120"/></div>
         <div class="full"><label>Motivo</label><textarea id="rep_reason" rows="3" placeholder="Perché è sbagliato…"></textarea></div>
       </div>
-      <div class="btn-row"><button class="primary" id="btn_submit_report">Invia segnalazione</button></div>
+      <div class="btn-row"><button class="primary" id="btn_submit_report">Apri issue su GitHub</button></div>
+      <p style="color:var(--muted);font-size:.78rem;margin-top:.4rem">Si aprirà GitHub con i campi precompilati: basta confermare per pubblicare. Non serve alcun token.</p>
       <p class="msg" id="report_feedback"></p>
     </div>
     <div class="card grid-wide">
-      <h3>Segnalazioni aperte</h3>
+      <h3>Segnalazioni (GitHub Issues)</h3>
       <div style="overflow-x:auto">
-        <table><thead><tr><th>Locale</th><th>Motivo</th><th>Data</th><th>Link</th><th></th></tr></thead>
+        <table><thead><tr><th>#</th><th>Titolo</th><th>Stato</th><th>Autore</th><th>Data</th></tr></thead>
         <tbody id="reports_table"></tbody></table>
       </div>
     </div>
@@ -342,23 +341,6 @@ textarea.editor {
       <button class="danger" id="btn_stop">⏹ Stop</button>
     </div>
     <p class="msg" id="ctrl_feedback"></p>
-  </div>
-</section>
-
-<!-- DATA -->
-<section id="page-data" class="page">
-  <div class="page-header">
-    <h2>Editor dati</h2>
-    <p>Modifica i file JSON del progetto. Salva con attenzione.</p>
-  </div>
-  <div class="card grid-wide">
-    <div class="btn-row">
-      <select id="data_file"></select>
-      <button id="btn_load_data">Carica</button>
-      <button class="primary" id="btn_save_data">Salva</button>
-    </div>
-    <textarea class="editor" id="data_editor" spellcheck="false"></textarea>
-    <p class="msg" id="data_feedback"></p>
   </div>
 </section>
 
@@ -586,26 +568,23 @@ async function loadReview() {
 async function loadReports() {
   try {
     const r = await api('/api/reports');
+    if (r.issues_url) $('reports_repo_link').href = r.issues_url;
     const tb = $('reports_table');
     tb.innerHTML = '';
-    (r.items||[]).forEach(rep => {
+    (r.items||[]).forEach(it => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td><strong>${rep.locale_name}</strong></td>
-        <td>${rep.reason||'—'}</td>
-        <td>${rep.reported_at||'—'}</td>
-        <td>${ytLink(rep.youtube_url)}</td>
-        <td><button class="sm" data-id="${rep.report_id}">Chiudi</button></td>`;
+      const cls = it.state === 'open' ? 'tag-flag' : 'tag-ok';
+      tr.innerHTML = `<td>#${it.number}</td>
+        <td><a href="${it.url}" target="_blank" rel="noopener">${it.title||'(senza titolo)'}</a></td>
+        <td><span class="${cls}">${it.state}</span></td>
+        <td>${it.user||'—'}</td>
+        <td>${(it.created_at||'').slice(0,10)||'—'}</td>`;
       tb.appendChild(tr);
     });
-    if (!(r.items||[]).length) tb.innerHTML = '<tr><td colspan="5" class="empty">Nessuna segnalazione aperta</td></tr>';
-    tb.querySelectorAll('button[data-id]').forEach(btn => {
-      btn.onclick = async () => {
-        await api('/api/reports', { method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ action:'resolve', report_id: btn.dataset.id }) });
-        loadReports(); poll();
-      };
-    });
-  } catch(e) {}
+    if (!(r.items||[]).length) tb.innerHTML = '<tr><td colspan="5" class="empty">Nessuna segnalazione su GitHub</td></tr>';
+  } catch(e) {
+    $('reports_table').innerHTML = '<tr><td colspan="5" class="empty">Impossibile leggere le issue (offline?)</td></tr>';
+  }
 }
 
 $('btn_submit_report').onclick = async () => {
@@ -613,53 +592,21 @@ $('btn_submit_report').onclick = async () => {
   const reason = $('rep_reason').value.trim();
   if (!name || !reason) return setMsg('report_feedback','Nome e motivo obbligatori',false);
   try {
-    await api('/api/reports', {
+    const r = await api('/api/reports', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
-        action: 'submit',
         locale_name: name,
         reason,
         video_id: $('rep_video').value.trim(),
-        visit_id: $('rep_visit').value.trim(),
         youtube_url: $('rep_url').value.trim(),
       }),
     });
-    setMsg('report_feedback','Segnalazione inviata',true);
+    if (r.issue_url) window.open(r.issue_url, '_blank', 'noopener');
+    setMsg('report_feedback','GitHub aperto: conferma per pubblicare la issue.',true);
     $('rep_name').value = ''; $('rep_reason').value = '';
-    loadReports(); poll();
   } catch(e) { setMsg('report_feedback', e.message, false); }
 };
 
-async function loadDataFiles() {
-  const r = await api('/api/data');
-  const sel = $('data_file');
-  sel.innerHTML = '';
-  (r.files||[]).forEach(f => {
-    const o = document.createElement('option'); o.value = f; o.textContent = f; sel.appendChild(o);
-  });
-}
-$('btn_load_data').onclick = async () => {
-  const name = $('data_file').value;
-  try {
-    const r = await api('/api/data/' + encodeURIComponent(name));
-    $('data_editor').value = r.content;
-    setMsg('data_feedback','Caricato '+name, true);
-  } catch(e) { setMsg('data_feedback', e.message, false); }
-};
-$('btn_save_data').onclick = async () => {
-  const name = $('data_file').value;
-  let content = $('data_editor').value;
-  try {
-    if (!name.endsWith('.txt')) content = JSON.parse(content);
-    await api('/api/data/' + encodeURIComponent(name), {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ content }),
-    });
-    setMsg('data_feedback','Salvato', true);
-  } catch(e) { setMsg('data_feedback', e.message, false); }
-};
-
-loadDataFiles();
 setInterval(poll, 2000);
 poll();
 </script>

@@ -30,7 +30,11 @@ from scripts.extract_locales import (
 from scripts.utils import CONFIDENCE_THRESHOLD
 from scripts.ner_candidates import Candidate, extract_chunk_candidates
 from scripts.utils import setup_logging
-from scripts.visit_classifier import classify_candidate, get_transcript_window
+from scripts.visit_classifier import (
+    classify_candidate,
+    get_transcript_window,
+    verify_venue_name,
+)
 
 if TYPE_CHECKING:
     from scripts.video_intelligence import VideoIntel
@@ -168,18 +172,29 @@ def _promote_venue_hints(
     extractions: list[dict],
     flagged: list[dict],
 ) -> None:
-    """Turn high-confidence title/chapter/description hints into extractions."""
+    """Promote ONLY structured, reliable hints (title/chapter) into extractions.
+
+    Description- and comment-derived hints come from noisy regex/crowd text, so
+    they are NOT promoted blindly; they only help confirm NER candidates and
+    must still be geocoded/verified downstream.
+    """
     if not video_intel or not video_intel.venue_hints:
         return
 
     seen = {_normalize_name(e["locale_name"]) for e in extractions}
-    conf_map = {"very_high": 0.88, "high": 0.82, "medium": 0.72}
+    # Only the most reliable structured sources are promoted directly.
+    trusted_sources = {"title", "chapter"}
+    conf_map = {"very_high": 0.85, "high": 0.80}
 
     rubrica = channel_rubriche[0] if channel_rubriche else ""
     if video_intel.series_name:
         rubrica = video_intel.series_name
 
     for h in video_intel.venue_hints:
+        if h.get("source") not in trusted_sources:
+            continue
+        if h.get("confidence") not in ("very_high", "high"):
+            continue
         name = _clean_locale_name(str(h.get("name") or ""))
         if not _is_valid_locale_name(name):
             continue
@@ -187,7 +202,7 @@ def _promote_venue_hints(
         if norm in seen:
             continue
 
-        conf = conf_map.get(str(h.get("confidence") or ""), 0.68)
+        conf = conf_map.get(str(h.get("confidence") or ""), 0.80)
         start = h.get("start_time")
         row = {
             "locale_name": name,
@@ -263,6 +278,13 @@ def extract_from_video(
             if not window:
                 window = chunk.get("text", "")[:2000]
 
+            # Stage 1 — verify the candidate is actually a venue proper name
+            # (rejects dishes, people, cities, generic words) before the more
+            # expensive visit classification. Precision-first.
+            if not verify_venue_name(llm, name_clean, window):
+                continue
+
+            # Stage 2 — is the host actually visiting this venue here?
             is_visit, evidence, conf, src = classify_candidate(
                 window, cand, ctx_by_label, llm
             )

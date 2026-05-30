@@ -1,7 +1,8 @@
 """
 dashboard_web.py — Browser dashboard for the CiboBuono pipeline.
 
-Live monitoring, manual review queue, locale reports, JSON editing, pipeline control.
+Live monitoring, manual review queue, GitHub-Issues reports, pipeline control.
+Data files are edited manually (outside the dashboard) by design.
 """
 
 from __future__ import annotations
@@ -12,25 +13,25 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 from scripts.dashboard import DASHBOARD_SNAPSHOT_PATH, Dashboard
+from scripts.github_issues import (
+    GITHUB_REPO,
+    issues_page_url,
+    list_reports,
+    report_issue_url,
+)
 from scripts.pipeline_control import (
-    EDITABLE_FILES,
-    read_editable,
     request_pause,
     request_resume,
     request_stop,
     start_pipeline,
     sync_status,
-    write_editable,
 )
 from scripts.review_queue import (
-    list_reports,
     pending_reviews,
-    resolve_report,
     resolve_review,
-    submit_report,
     visits_with_links,
 )
 
@@ -50,28 +51,21 @@ class _Handler(BaseHTTPRequestHandler):
             data = Dashboard.load_snapshot() or {}
             data["control"] = sync_status()
             data["review_pending_count"] = len(pending_reviews(limit=500))
-            data["reports_open_count"] = len(list_reports(limit=500))
+            data["reports_open_count"] = sum(
+                1 for it in list_reports(limit=100, state="open")
+            )
             data["recent_visits"] = visits_with_links(limit=25)
             self._json(data)
         elif path == "/api/review":
             self._json({"items": pending_reviews(limit=80)})
         elif path == "/api/reports":
-            self._json({"items": list_reports(limit=50)})
-        elif path == "/api/data":
-            self._json({"files": sorted(EDITABLE_FILES.keys())})
-        elif path.startswith("/api/data/"):
-            name = unquote(path.split("/api/data/", 1)[1])
-            try:
-                content, kind = read_editable(name)
-                if kind == "json":
-                    payload = json.dumps(content, ensure_ascii=False, indent=2)
-                else:
-                    payload = content
-                self._json({"name": name, "kind": kind, "content": payload})
-            except KeyError:
-                self._json({"error": "File non consentito"}, status=404)
-            except OSError as e:
-                self._json({"error": str(e)}, status=500)
+            self._json(
+                {
+                    "repo": GITHUB_REPO,
+                    "issues_url": issues_page_url("all"),
+                    "items": list_reports(limit=50),
+                }
+            )
         else:
             self.send_error(404)
 
@@ -118,37 +112,17 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/reports":
-            action = body.get("action", "submit")
+            # Backend-less: return a prefilled GitHub "new issue" URL. The user
+            # reviews and submits it on GitHub, so no token is ever needed.
             try:
-                if action == "resolve":
-                    ok, msg = resolve_report(str(body.get("report_id", "")))
-                    if not ok:
-                        self._json({"error": msg}, status=404)
-                        return
-                    self._json({"ok": True, "message": msg})
-                    return
-                entry = submit_report(
+                url = report_issue_url(
                     locale_name=str(body.get("locale_name", "")),
                     reason=str(body.get("reason", "")),
                     video_id=str(body.get("video_id", "")),
-                    visit_id=str(body.get("visit_id", "")),
                     youtube_url=str(body.get("youtube_url", "")),
                 )
-                self._json({"ok": True, "report": entry})
+                self._json({"ok": True, "issue_url": url})
             except Exception as e:
-                self._json({"error": str(e)}, status=500)
-            return
-
-        if path.startswith("/api/data/"):
-            name = unquote(path.split("/api/data/", 1)[1])
-            try:
-                write_editable(name, body.get("content"))
-                self._json({"ok": True, "message": f"Salvato {name}"})
-            except KeyError:
-                self._json({"error": "File non consentito"}, status=404)
-            except (ValueError, TypeError) as e:
-                self._json({"error": str(e)}, status=400)
-            except OSError as e:
                 self._json({"error": str(e)}, status=500)
             return
 

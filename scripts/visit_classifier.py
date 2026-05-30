@@ -213,6 +213,90 @@ def classify_with_llm(
         return False, "", 0.4
 
 
+# Words that are NEVER a venue proper name (dishes, ingredients, generic terms).
+# Used to reject false positives before the (expensive) visit classification.
+NON_VENUE_TERMS = frozenset({
+    # dishes / food
+    "pizza", "pasta", "carbonara", "amatriciana", "gricia", "cacio", "pepe",
+    "maritozzo", "cornetto", "gelato", "tiramisu", "tiramisù", "supplì", "suppli",
+    "arancino", "arancina", "trapizzino", "panzerotto", "porchetta", "montanara",
+    "parmigiana", "lasagna", "lasagne", "gnocco", "pinsa", "focaccia", "calzone",
+    "cannolo", "cannoli", "panino", "hamburger", "burger", "kebab", "ramen",
+    "sushi", "bistecca", "tartare", "crudo", "mozzarella", "burrata", "prosciutto",
+    "salame", "vino", "birra", "caffè", "caffe", "espresso", "cappuccino",
+    "menu", "antipasto", "primo", "secondo", "contorno", "dolce", "dessert",
+    # generic / filler
+    "buono", "buonissimo", "ottimo", "delizioso", "fantastico", "spettacolare",
+    "ragazzi", "amici", "video", "canale", "puntata", "oggi", "qui", "qua",
+    "italia", "italiano", "italiana", "roma", "milano", "napoli", "torino",
+})
+
+
+def _looks_like_venue_name(name: str) -> bool:
+    """Cheap structural gate: real venue names are capitalized proper nouns."""
+    n = name.strip()
+    if len(n) < 3:
+        return False
+    tokens = n.split()
+    meaningful = [t for t in tokens if t.lower() not in NON_VENUE_TERMS]
+    if not meaningful:
+        return False
+    # at least one capitalized token that is not a known non-venue term
+    has_proper = any(
+        t[:1].isupper() and t.lower() not in NON_VENUE_TERMS for t in tokens
+    )
+    return has_proper
+
+
+_VENUE_VERIFY_SYSTEM = (
+    "You verify whether a phrase is the PROPER NAME of a specific food business "
+    "(restaurant, pizzeria, bakery, bar, street-food stall). Answer ONLY JSON."
+)
+
+_VENUE_VERIFY_TEMPLATE = (
+    'PHRASE: "{name}"\n\n'
+    'CONTEXT:\n"{window}"\n\n'
+    "Return exactly one JSON object, no markdown:\n"
+    '{{"is_venue": true or false}}\n\n'
+    "Rules:\n"
+    "- is_venue=true ONLY if the phrase names a specific food business.\n"
+    "- is_venue=false for dishes, ingredients, cities, neighborhoods, people, "
+    "product brands, or generic words.\n"
+    "- If unsure, answer false."
+)
+
+
+def verify_venue_name(llm, name: str, window_text: str) -> bool:
+    """Two-stage verification: reject non-venue candidates (VerifiNER-style).
+
+    Without an LLM, fall back to the structural gate only.
+    """
+    if not _looks_like_venue_name(name):
+        return False
+    if llm is None:
+        return True  # structural gate already passed
+    user_msg = _VENUE_VERIFY_TEMPLATE.format(
+        name=name.replace('"', "'")[:120],
+        window=(window_text[:1200]).replace('"', "'"),
+    )
+    try:
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": _VENUE_VERIFY_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=30,
+            temperature=0.0,
+            stop=["```", "\n\n"],
+        )
+        out = response["choices"][0]["message"]["content"].strip()
+        data = _parse_llm_visit_json(out.replace("is_venue", "visit")) or {}
+        return bool(data.get("visit"))
+    except Exception as e:
+        logger.warning(f"Venue verification failed for '{name}': {e}")
+        return True  # do not lose candidates on transient LLM errors
+
+
 def classify_candidate(
     window_text: str,
     candidate: "Candidate",

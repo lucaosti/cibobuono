@@ -40,7 +40,7 @@ SKIPPED_VIDEOS_JSON = DATA_DIR / "skipped_videos.json"
 CORRECTIONS_JSON = DATA_DIR / "corrections.json"
 
 # --- Confidence threshold ---
-CONFIDENCE_THRESHOLD = 0.65
+CONFIDENCE_THRESHOLD = 0.72
 
 # --- Deduplication settings ---
 DEDUP_DISTANCE_METERS = 200

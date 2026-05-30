@@ -139,28 +139,58 @@ def get_gliner():
         return None
 
 
+# Only used when GLiNER is completely unavailable. Requires an explicit venue
+# trigger immediately before a capitalized name so we do not grab arbitrary
+# capitalized words (a major false-positive source).
+_NAME_RE = r"[A-ZÀ-Ú][\wà-ú'’]+(?:\s+[A-ZÀ-Ú][\wà-ú'’]+){0,2}"
+
+# Venue-type nouns: the trigger word is PART of the name (Forno Roscioli).
+# Case-insensitivity is scoped to the trigger so the name pattern stays
+# case-SENSITIVE (only real Capitalized proper nouns are captured).
+_TRIGGER_TYPE = re.compile(
+    r"\b(?i:(pizzeria|trattoria|ristorante|osteria|forno|panificio|pasticceria|"
+    r"gelateria|friggitoria|rosticceria|enoteca|hosteria|locanda))\s+(" + _NAME_RE + r")"
+)
+# Prepositions: the trigger word is NOT part of the name (da Michele -> Michele).
+_TRIGGER_PREP = re.compile(
+    r"\b(?i:da|al|alla|allo|dal|dalla|presso)\s+(" + _NAME_RE + r")"
+)
+
+
 def _heuristic_venue_spans(text: str) -> list[tuple[str, int, int, float]]:
-    """Capitalized phrase heuristic when GLiNER is unavailable."""
+    """Trigger-anchored heuristic, used ONLY when GLiNER cannot load.
+
+    Requires a venue trigger word right before the candidate name, so it cannot
+    pick up arbitrary capitalized tokens.
+    """
     from scripts.extract_locales import GENERIC_WORDS, _is_valid_locale_name
 
     out: list[tuple[str, int, int, float]] = []
-    pat = re.compile(
-        r"\b([A-ZÀ-Ú][a-zà-ú']+(?:\s+[A-ZÀ-Ú][a-zà-ú']+){0,3})\b"
-    )
-    for m in pat.finditer(text):
+    seen: set[tuple[int, int]] = set()
+
+    for m in _TRIGGER_TYPE.finditer(text):
+        name = f"{m.group(1).capitalize()} {m.group(2).strip()}"
+        start, end = m.start(0), m.end(0)
+        if not _is_valid_locale_name(name) or name.lower() in GENERIC_WORDS:
+            continue
+        seen.add((start, end))
+        out.append((name, start, end, 0.5))
+
+    for m in _TRIGGER_PREP.finditer(text):
         name = m.group(1).strip()
-        if not _is_valid_locale_name(name):
+        start, end = m.start(1), m.end(1)
+        if any(s <= start < e for s, e in seen):
             continue
-        if name.lower() in GENERIC_WORDS:
+        if not _is_valid_locale_name(name) or name.lower() in GENERIC_WORDS:
             continue
-        out.append((name, m.start(), m.end(), 0.45))
+        out.append((name, start, end, 0.5))
     return out
 
 
 def extract_chunk_candidates(
     chunk: dict,
     *,
-    threshold: float = 0.25,
+    threshold: float = 0.5,
 ) -> tuple[list[Candidate], list[Candidate]]:
     """
     Run NER on one transcription chunk.
@@ -219,25 +249,8 @@ def extract_chunk_candidates(
                 venues.append(c)
             elif label in CONTEXT_LABELS:
                 context.append(c)
-
-        if not venues:
-            for name, start, end, score in _heuristic_venue_spans(text):
-                st = (
-                    _char_span_to_start_time(start, end, ranges, t_fallback)
-                    if ranges
-                    else t_fallback
-                )
-                venues.append(
-                    Candidate(
-                        name=name,
-                        label="restaurant",
-                        start_char=start,
-                        end_char=end,
-                        start_time=st,
-                        chunk_index=chunk_index,
-                        ner_score=score,
-                    )
-                )
+        # When GLiNER is loaded we trust it: no capitalized-phrase fallback,
+        # which was a major false-positive source.
         return venues, context
 
     # Heuristic fallback: treat all as venue candidates, no structured context

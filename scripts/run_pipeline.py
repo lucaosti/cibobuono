@@ -627,10 +627,14 @@ def run_pipeline(
                     _dash_finish("processed_empty")
                     continue
 
-                # Build set of trusted venue names (high-confidence title/description hints)
+                # Build set of trusted venue names. Only STRUCTURED sources
+                # (title/chapter) are trusted enough to bypass geocoding/OSM
+                # verification — description/comment hints are too noisy.
                 trusted_venue_names: set[str] = set()
                 if video_intel:
                     for hint in video_intel.venue_hints:
+                        if hint.get("source") not in ("title", "chapter"):
+                            continue
                         if hint.get("confidence") in ("very_high", "high"):
                             trusted_venue_names.add(hint["name"].lower().strip())
 

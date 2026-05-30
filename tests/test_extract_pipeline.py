@@ -136,15 +136,28 @@ def test_pipeline_single_chunk_llm_keeps_visit():
 
     with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
         with patch("scripts.extract_pipeline.get_llm", return_value=mock_llm):
-            with patch(
-                "scripts.extract_pipeline.classify_candidate",
-                return_value=(True, "evidence", 0.85, "llm"),
-            ):
-                ext, flagged = extract_from_video(
-                    "v3",
-                    chunks,
-                    video_title="Roma criminale",
-                    transcript=transcript,
-                )
+            with patch("scripts.extract_pipeline.verify_venue_name", return_value=True):
+                with patch(
+                    "scripts.extract_pipeline.classify_candidate",
+                    return_value=(True, "evidence", 0.85, "llm"),
+                ):
+                    ext, flagged = extract_from_video(
+                        "v3",
+                        chunks,
+                        video_title="Roma criminale",
+                        transcript=transcript,
+                    )
     assert any(e["locale_name"] == "Trattoria Rossi" for e in ext)
     assert not any(f.get("locale_name") == "Trattoria Rossi" for f in flagged)
+
+
+def test_verify_venue_name_rejects_dish():
+    """A dish name must be rejected even with a strong visit signal."""
+    from scripts.visit_classifier import verify_venue_name, _looks_like_venue_name
+
+    assert _looks_like_venue_name("Trattoria Rossi") is True
+    assert _looks_like_venue_name("carbonara") is False
+    assert _looks_like_venue_name("Carbonara") is False
+    # No LLM → structural gate only
+    assert verify_venue_name(None, "Da Michele", "") is True
+    assert verify_venue_name(None, "pizza", "") is False
