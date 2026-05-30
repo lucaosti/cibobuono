@@ -237,6 +237,29 @@ def test_list_gguf_models_sorted(tmp_path):
 
 def test_apply_friendly_priority_idempotent():
     rm._priority_applied = False
+
+
+def test_gpu_compute_percent_from_gpustat(monkeypatch):
+    fake = types.SimpleNamespace(
+        returncode=0,
+        stdout='{"gpus":[{"utilization.gpu":97,"memory.total":16384,"memory.used":2400}]}',
+    )
+    monkeypatch.setattr(rm.subprocess, "run", lambda *a, **k: fake)
+    assert rm._gpu_compute_percent_gpustat() == 97.0
+
+
+def test_dashboard_hardware_uses_compute_not_vram(monkeypatch):
+    monkeypatch.setattr(rm, "_gpu_compute_percent", lambda: 97.0)
+    monkeypatch.setattr(rm, "_gpu_memory_gb", lambda: (16.0, 13.0, 15.0))
+
+    import sys
+    fake_psutil = types.ModuleType("psutil")
+    fake_psutil.cpu_percent = lambda interval=0: 12.0
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    hw = rm.dashboard_hardware()
+    assert hw["gpu_percent"] == 97.0
+    assert hw["gpu_memory_percent"] == 15.0
     rm.apply_friendly_priority()
     rm.apply_friendly_priority()  # must not raise or lower priority twice
     assert rm._priority_applied is True

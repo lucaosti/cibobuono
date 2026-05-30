@@ -610,6 +610,9 @@ async function pollHardware() {
     $('hw_gpu').textContent = gpu != null ? Math.round(gpu) + '%' : '—';
     if (cpu != null) $('hw_cpu_bar').style.width = Math.min(100, cpu) + '%';
     if (gpu != null) $('hw_gpu_bar').style.width = Math.min(100, gpu) + '%';
+    const gpuEl = document.querySelector('.hw-gpu');
+    if (gpuEl && h.gpu_memory_percent != null)
+      gpuEl.title = 'Utilizzo GPU (compute). VRAM: ' + Math.round(h.gpu_memory_percent) + '%';
   } catch(e) {}
 }
 

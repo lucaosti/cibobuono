@@ -163,6 +163,66 @@ def _gpu_memory_gb_gpustat() -> tuple[float | None, float | None, float | None]:
     return round(total, 2), round(free, 2), used_pct
 
 
+def _gpu_compute_percent() -> float | None:
+    """GPU SM utilization % (same metric as nvtop / nvidia-smi utilization.gpu)."""
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return _gpu_compute_percent_gpustat()
+    except Exception as exc:
+        logger.debug("nvidia-smi utilization probe failed: %s", exc)
+        return _gpu_compute_percent_gpustat()
+
+    if out.returncode != 0 or not out.stdout.strip():
+        return _gpu_compute_percent_gpustat()
+
+    try:
+        return round(float(out.stdout.strip().splitlines()[0].strip()), 1)
+    except ValueError:
+        return _gpu_compute_percent_gpustat()
+
+
+def _gpu_compute_percent_gpustat() -> float | None:
+    """GPU compute % via gpustat (fallback when nvidia-smi is unavailable)."""
+    try:
+        out = subprocess.run(
+            ["gpustat", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    except Exception as exc:
+        logger.debug("gpustat utilization probe failed: %s", exc)
+        return None
+
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+
+    try:
+        import json as _json
+
+        gpus = _json.loads(out.stdout).get("gpus") or []
+        if not gpus:
+            return None
+        util = gpus[0].get("utilization.gpu")
+        if util is None:
+            return None
+        return round(float(util), 1)
+    except (KeyError, TypeError, ValueError, _json.JSONDecodeError):
+        return None
+
+
 def _gpu_memory_gb() -> tuple[float | None, float | None, float | None]:
     """(total_gb, free_gb, used_percent) for the first CUDA GPU."""
     try:
@@ -258,7 +318,10 @@ def snapshot(*, include_gpu: bool = False) -> ResourceSnapshot:
 
 
 def dashboard_hardware() -> dict[str, float | None]:
-    """Lightweight CPU/GPU % for the web dashboard (polled every second)."""
+    """Lightweight CPU/GPU % for the web dashboard (polled every second).
+
+    GPU % is compute utilization (SM busy), matching nvtop — NOT VRAM usage.
+    """
     cpu_pct: float | None = None
     try:
         import psutil  # type: ignore
@@ -268,12 +331,13 @@ def dashboard_hardware() -> dict[str, float | None]:
         snap = snapshot(include_gpu=False)
         cpu_pct = min(100.0, snap.load_per_core / max(1, snap.cpu_count) * 100.0)
 
-    gpu_pct: float | None = None
-    _, _, gpu_pct = _gpu_memory_gb()
+    gpu_pct = _gpu_compute_percent()
+    _, _, vram_pct = _gpu_memory_gb()
 
     return {
         "cpu_percent": round(cpu_pct, 1) if cpu_pct is not None else None,
-        "gpu_percent": round(gpu_pct, 1) if gpu_pct is not None else None,
+        "gpu_percent": gpu_pct,
+        "gpu_memory_percent": vram_pct,
     }
 
 
