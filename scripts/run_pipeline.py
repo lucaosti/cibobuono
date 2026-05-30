@@ -38,6 +38,7 @@ __author__ = "Luca Ostinelli"
 
 import argparse
 import json
+import os
 import signal
 import sys
 from datetime import datetime, timezone
@@ -220,6 +221,9 @@ def run_pipeline(
 
     try:
         _log("Pipeline started")
+        from scripts import pipeline_control as pc
+
+        pc.mark_started(pid=os.getpid(), max_videos=max_videos)
         dash.set_phase("Phase 1 — Catalog")
 
         # ------------------------------------------------------------------
@@ -315,7 +319,21 @@ def run_pipeline(
         channels = load_json(CHANNELS_JSON)
         channel_map = {ch["channel_id"]: ch for ch in channels}
 
+        from scripts import pipeline_control as pc
+
         for i, video in enumerate(to_process, 1):
+            if pc.read_state().get("stop_requested"):
+                _pipeline_shutdown["graceful"] = True
+            if _pipeline_shutdown["graceful"]:
+                stopped_gracefully = True
+                _log("Graceful shutdown: not starting another video")
+                break
+            if not pc.wait_if_paused(should_abort=lambda: _pipeline_shutdown["graceful"]):
+                _pipeline_shutdown["graceful"] = True
+                stopped_gracefully = True
+                _log("Stop richiesto dalla dashboard")
+                break
+
             if _pipeline_shutdown["graceful"]:
                 stopped_gracefully = True
                 _log("Graceful shutdown: not starting another video")
@@ -741,6 +759,12 @@ def run_pipeline(
     finally:
         if not _external_setup:
             _restore_pipeline_signal_handlers()
+        try:
+            from scripts import pipeline_control as pc
+
+            pc.mark_finished()
+        except Exception:
+            pass
         if use_dash:
             dash.stop()
 

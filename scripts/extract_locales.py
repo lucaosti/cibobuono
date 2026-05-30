@@ -173,7 +173,7 @@ _FOOD_USER_TEMPLATE = (
     '- "Salviamo il X" = activism video → NO\n'
     '- Titles with "criminale" (e.g., "CITY criminale", "Forni criminali CITY") = food review → SI\n'
     '- Titles with "Hit di Franchino:" = single venue food review → SI\n'
-    "- When in doubt → NO (prefer skipping borderline videos)\n\n"
+    "- Borderline food/travel vlog with on-location eating → SI\n\n"
     "Answer with EXACTLY one word: SI or NO"
 )
 
@@ -189,6 +189,9 @@ def is_food_review_video(
         return True, "LLM not available, skipping check"
 
     sample = transcript_text[:2000].strip()
+    mid = len(transcript_text) // 2
+    if len(transcript_text) > 2500:
+        sample = (transcript_text[:1000] + " … " + transcript_text[mid : mid + 1000]).strip()
     if not sample:
         return True, "Empty transcript, skipping check"
 

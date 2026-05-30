@@ -100,3 +100,51 @@ def test_pipeline_drops_belgium_name_drop_without_signals():
             ):
                 ext, _ = extract_from_video("v2", chunks, transcript=transcript)
     assert ext == []
+
+
+def test_pipeline_single_chunk_llm_keeps_visit():
+    """LLM-confirmed visits in one chunk should not be flagged."""
+    chunks_text = "Siamo da Trattoria Rossi e proviamo la carbonara."
+    chunks = [
+        {
+            "chunk_index": 0,
+            "start_time": 10.0,
+            "start_timestamp": "0:10",
+            "end_timestamp": "1:40",
+            "text": chunks_text,
+            "segment_timestamps": [(10.0, chunks_text)],
+        }
+    ]
+    transcript = {"segments": [{"start": 10, "end": 30, "text": chunks_text}]}
+
+    fake_cand = __import__(
+        "scripts.ner_candidates", fromlist=["Candidate"]
+    ).Candidate(
+        name="Trattoria Rossi",
+        label="ristorante",
+        start_char=0,
+        end_char=15,
+        start_time=10.0,
+        chunk_index=0,
+        ner_score=0.55,
+    )
+
+    mock_llm = MagicMock()
+    mock_llm.create_chat_completion.return_value = {
+        "choices": [{"message": {"content": '{"rating": "7", "sentiment": "positive", "notes": "carbonara", "category": ["trattoria"], "city": "Roma", "address": ""}'}}]
+    }
+
+    with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
+        with patch("scripts.extract_pipeline.get_llm", return_value=mock_llm):
+            with patch(
+                "scripts.extract_pipeline.classify_candidate",
+                return_value=(True, "evidence", 0.85, "llm"),
+            ):
+                ext, flagged = extract_from_video(
+                    "v3",
+                    chunks,
+                    video_title="Roma criminale",
+                    transcript=transcript,
+                )
+    assert any(e["locale_name"] == "Trattoria Rossi" for e in ext)
+    assert not any(f.get("locale_name") == "Trattoria Rossi" for f in flagged)

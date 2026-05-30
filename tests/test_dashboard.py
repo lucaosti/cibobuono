@@ -78,16 +78,9 @@ def test_complete_video_timing_and_recent(dash: Dashboard):
     assert snap["recent_videos"][0]["visits"] == 2
 
 
-def test_snapshot_includes_hardware_metrics(dash: Dashboard):
-    snap = dash.to_snapshot_dict()
-    assert "hardware" in snap
-    hw = snap["hardware"]
-    # resource_monitor degrades gracefully, so we should always get a dict
-    if hw is not None:
-        assert "ram_total_gb" in hw
-        assert "ram_used_percent" in hw
-        assert "under_pressure" in hw
-        assert "cpu_count" in hw
+def test_snapshot_has_control_key_when_merged():
+    snap = Dashboard(live=False).to_snapshot_dict()
+    assert "hardware" not in snap
 
 
 def test_load_snapshot_missing_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

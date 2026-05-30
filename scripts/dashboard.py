@@ -151,7 +151,6 @@ class Dashboard:
         self.console = Console()
         self.state = DashboardState()
         self._live: Live | None = None
-        self._hw_include_gpu = self._detect_gpu_present()
         self._video_progress = Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
@@ -328,50 +327,6 @@ class Dashboard:
             self.state.log_lines = self.state.log_lines[-self.state.max_log_lines :]
         self._touch()
 
-    # ── Hardware metrics (live RAM/VRAM/CPU) ───────────────────────────
-
-    @staticmethod
-    def _detect_gpu_present() -> bool:
-        """Decide once whether to probe the GPU on each snapshot.
-
-        Avoids spawning nvidia-smi on every poll for CPU/Metal-only hosts.
-        """
-        try:
-            from scripts.hardware import get_profile
-
-            return bool(get_profile().has_cuda)
-        except Exception:
-            return False
-
-    def _hardware_metrics(self) -> dict | None:
-        """Live RAM / swap / CPU-load / VRAM reading via resource_monitor."""
-        try:
-            from scripts.resource_monitor import (
-                PRESSURE_RAM_PERCENT,
-                snapshot,
-                under_pressure,
-            )
-
-            snap = snapshot(include_gpu=self._hw_include_gpu)
-            stressed, reason = under_pressure(snap, include_gpu=self._hw_include_gpu)
-            return {
-                "ram_total_gb": snap.ram_total_gb,
-                "ram_available_gb": snap.ram_available_gb,
-                "ram_used_percent": snap.ram_used_percent,
-                "swap_used_gb": snap.swap_used_gb,
-                "swap_used_percent": snap.swap_used_percent,
-                "load_per_core": snap.load_per_core,
-                "cpu_count": snap.cpu_count,
-                "gpu_total_gb": snap.gpu_total_gb,
-                "gpu_free_gb": snap.gpu_free_gb,
-                "gpu_used_percent": snap.gpu_used_percent,
-                "under_pressure": stressed,
-                "pressure_reason": reason,
-                "ram_pressure_threshold": PRESSURE_RAM_PERCENT,
-            }
-        except Exception:
-            return None
-
     # ── Snapshot (web UI + headless watch mode) ────────────────────────
 
     def to_snapshot_dict(self) -> dict:
@@ -424,7 +379,6 @@ class Dashboard:
                 for v in s.recent_completed
             ],
             "database_locales": db_locales,
-            "hardware": self._hardware_metrics(),
             "log_tail": list(s.log_lines[-20:]),
         }
 
@@ -505,45 +459,6 @@ class Dashboard:
         )
 
         stats_panel = Panel(stats_table, title="[bold]Statistiche", border_style="blue", expand=True)
-
-        hw = self._hardware_metrics()
-        hw_text = Text()
-        if hw:
-            ram_style = "red" if hw["ram_used_percent"] >= hw["ram_pressure_threshold"] else "green"
-            hw_text.append("RAM ", style="bold")
-            hw_text.append(
-                f"{hw['ram_available_gb']:.1f}/{hw['ram_total_gb']:.1f} GB liberi "
-                f"({hw['ram_used_percent']:.0f}% usata)\n",
-                style=ram_style,
-            )
-            hw_text.append("CPU ", style="bold")
-            hw_text.append(
-                f"{hw['cpu_count']} core · load/core {hw['load_per_core']:.2f}\n",
-                style="cyan",
-            )
-            if hw["swap_used_percent"]:
-                hw_text.append(
-                    f"Swap {hw['swap_used_gb']:.1f} GB ({hw['swap_used_percent']:.0f}%)\n",
-                    style="yellow" if hw["swap_used_percent"] >= 25 else "dim",
-                )
-            if hw["gpu_total_gb"]:
-                gpu_style = "red" if (hw["gpu_used_percent"] or 0) >= 92 else "green"
-                hw_text.append("VRAM ", style="bold")
-                hw_text.append(
-                    f"{hw['gpu_free_gb']:.1f}/{hw['gpu_total_gb']:.1f} GB liberi "
-                    f"({hw['gpu_used_percent']:.0f}% usata)\n",
-                    style=gpu_style,
-                )
-            else:
-                hw_text.append("VRAM ", style="bold")
-                hw_text.append("n/d (CPU/Metal)\n", style="dim")
-            if hw["under_pressure"]:
-                hw_text.append(f"⚠ Sotto pressione: {hw['pressure_reason']}", style="bold red")
-            else:
-                hw_text.append("✓ Risorse OK", style="green")
-        else:
-            hw_text.append("(metriche hardware non disponibili)", style="dim")
-        hw_panel = Panel(hw_text, title="[bold]Hardware (live)", border_style="cyan", expand=True)
 
         if s.current_video_index > 0:
             title_trunc = s.current_video_title[: cols - 30] if s.current_video_title else "—"
@@ -660,7 +575,6 @@ class Dashboard:
             Align.center(header),
             "",
             stats_panel,
-            hw_panel,
             video_panel,
             sources_panel,
             locales_panel,

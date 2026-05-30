@@ -32,6 +32,14 @@ def _refine_candidate_text(raw: str) -> str:
 # GLiNER labels (natural phrases work better than single tokens for multiv2.1)
 NER_LABELS = [
     "restaurant",
+    "ristorante",
+    "pizzeria",
+    "trattoria",
+    "forno",
+    "panificio",
+    "pasticceria",
+    "gelateria",
+    "osteria",
     "bakery",
     "street food stall",
     "food market",
@@ -46,6 +54,14 @@ NER_LABELS = [
 
 VENUE_LABELS = frozenset({
     "restaurant",
+    "ristorante",
+    "pizzeria",
+    "trattoria",
+    "forno",
+    "panificio",
+    "pasticceria",
+    "gelateria",
+    "osteria",
     "bakery",
     "street food stall",
     "food market",
@@ -144,7 +160,7 @@ def _heuristic_venue_spans(text: str) -> list[tuple[str, int, int, float]]:
 def extract_chunk_candidates(
     chunk: dict,
     *,
-    threshold: float = 0.35,
+    threshold: float = 0.25,
 ) -> tuple[list[Candidate], list[Candidate]]:
     """
     Run NER on one transcription chunk.
@@ -203,6 +219,25 @@ def extract_chunk_candidates(
                 venues.append(c)
             elif label in CONTEXT_LABELS:
                 context.append(c)
+
+        if not venues:
+            for name, start, end, score in _heuristic_venue_spans(text):
+                st = (
+                    _char_span_to_start_time(start, end, ranges, t_fallback)
+                    if ranges
+                    else t_fallback
+                )
+                venues.append(
+                    Candidate(
+                        name=name,
+                        label="restaurant",
+                        start_char=start,
+                        end_char=end,
+                        start_time=st,
+                        chunk_index=chunk_index,
+                        ner_score=score,
+                    )
+                )
         return venues, context
 
     # Heuristic fallback: treat all as venue candidates, no structured context

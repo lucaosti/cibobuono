@@ -1,14 +1,12 @@
 """
 dashboard_web.py — Browser dashboard for the CiboBuono pipeline.
 
-Reads ``logs/dashboard_live.json`` (written by run_pipeline / Dashboard) and
-serves a live-updating HTML page.
+Live monitoring, JSON data editing, and pipeline control (start N / all pending,
+pause, stop).
 
 Usage:
     python -m scripts.dashboard_web
     python -m scripts.dashboard_web --port 8765 --host 0.0.0.0
-
-Open http://localhost:8765/ while the pipeline runs (or after a run).
 """
 
 from __future__ import annotations
@@ -18,9 +16,19 @@ __author__ = "Luca Ostinelli"
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from scripts.dashboard import DASHBOARD_SNAPSHOT_PATH, Dashboard
+from scripts.pipeline_control import (
+    EDITABLE_FILES,
+    read_editable,
+    request_pause,
+    request_resume,
+    request_stop,
+    start_pipeline,
+    sync_status,
+    write_editable,
+)
 
 _HTML = """<!DOCTYPE html>
 <html lang="it">
@@ -54,23 +62,33 @@ _HTML = """<!DOCTYPE html>
   .conf-mid { color: var(--yellow); }
   .conf-low { color: var(--red); }
   .flag { color: var(--red); font-size: .75rem; }
-  .step-active { color: var(--accent); font-weight: 600; }
   .sources li { margin: .2rem 0; }
   .log { font-family: ui-monospace, monospace; font-size: .75rem; color: var(--muted);
     max-height: 160px; overflow-y: auto; white-space: pre-wrap; }
   .pill { display: inline-block; background: #243044; padding: .15rem .5rem; border-radius: 999px;
     font-size: .75rem; margin-right: .35rem; }
-  .bar { background: #243044; border-radius: 6px; height: 10px; overflow: hidden; margin: .2rem 0 .5rem; }
-  .bar > span { display: block; height: 100%; }
-  .bar-ok > span { background: var(--green); }
-  .bar-warn > span { background: var(--yellow); }
-  .bar-hot > span { background: var(--red); }
-  .hw-label { display: flex; justify-content: space-between; font-size: .82rem; }
-  .pressure-ok { color: var(--green); }
-  .pressure-hot { color: var(--red); font-weight: 700; }
-  @media (min-width: 900px) {
-    .wide { grid-column: 1 / -1; }
+  .pill-running { background: #14532d; color: var(--green); }
+  .pill-paused { background: #713f12; color: var(--yellow); }
+  .pill-idle { background: #243044; }
+  .btn-row { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; align-items: center; }
+  button, select, input[type=number] {
+    background: #243044; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: .45rem .75rem; font-size: .85rem; cursor: pointer;
   }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #1e3a5f; border-color: var(--cyan); }
+  button.danger { border-color: var(--red); color: #fca5a5; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  input[type=number] { width: 5rem; }
+  textarea.editor {
+    width: 100%; min-height: 280px; font-family: ui-monospace, monospace; font-size: .78rem;
+    background: #0f1419; color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+    padding: .75rem; resize: vertical;
+  }
+  .msg { font-size: .82rem; margin-top: .5rem; min-height: 1.2em; }
+  .msg.ok { color: var(--green); }
+  .msg.err { color: var(--red); }
+  @media (min-width: 900px) { .wide { grid-column: 1 / -1; } }
 </style>
 </head>
 <body>
@@ -89,16 +107,19 @@ _HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h2>Hardware (live)</h2>
-    <div id="hw_body">
-      <div class="hw-label"><span>RAM</span><span id="hw_ram">—</span></div>
-      <div class="bar" id="hw_ram_bar"><span style="width:0%"></span></div>
-      <div class="hw-label"><span>VRAM</span><span id="hw_vram">—</span></div>
-      <div class="bar" id="hw_vram_bar"><span style="width:0%"></span></div>
-      <div class="hw-label"><span>CPU load/core</span><span id="hw_cpu">—</span></div>
-      <div class="hw-label"><span>Swap</span><span id="hw_swap">—</span></div>
-      <p id="hw_pressure" style="margin:.5rem 0 0">—</p>
+    <h2>Controllo pipeline</h2>
+    <p><span class="pill" id="ctrl_status">—</span> <span id="ctrl_msg" class="sub"></span></p>
+    <div class="btn-row">
+      <label>Video: <input type="number" id="max_videos" min="1" value="5" placeholder="N"/></label>
+      <button class="primary" id="btn_start_n">Avvia N video</button>
+      <button class="primary" id="btn_start_all">Avvia tutti i pending</button>
     </div>
+    <div class="btn-row">
+      <button id="btn_pause">Pausa</button>
+      <button id="btn_resume">Riprendi</button>
+      <button class="danger" id="btn_stop">Stop</button>
+    </div>
+    <p class="msg" id="ctrl_feedback"></p>
   </div>
 
   <div class="card">
@@ -120,6 +141,17 @@ _HTML = """<!DOCTYPE html>
   <div class="card">
     <h2>Dati video usati</h2>
     <ul class="sources" id="sources"></ul>
+  </div>
+
+  <div class="card wide">
+    <h2>Modifica dati JSON</h2>
+    <div class="btn-row">
+      <select id="data_file"></select>
+      <button id="btn_load_data">Carica</button>
+      <button class="primary" id="btn_save_data">Salva</button>
+    </div>
+    <textarea class="editor" id="data_editor" spellcheck="false" placeholder="Seleziona un file e clicca Carica…"></textarea>
+    <p class="msg" id="data_feedback"></p>
   </div>
 
   <div class="card wide">
@@ -162,56 +194,37 @@ function fmt(s) {
 }
 function confClass(c) {
   if (c == null) return '';
-  if (c >= 0.72) return 'conf-high';
+  if (c >= 0.65) return 'conf-high';
   if (c >= 0.5) return 'conf-mid';
   return 'conf-low';
 }
 function confPct(c) { return c == null ? '—' : Math.round(c*100)+'%'; }
 
-function barClass(pct) {
-  if (pct == null) return 'bar';
-  if (pct >= 90) return 'bar bar-hot';
-  if (pct >= 75) return 'bar bar-warn';
-  return 'bar bar-ok';
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
 }
-function setBar(id, pct) {
+
+function setFeedback(id, msg, ok) {
   const el = document.getElementById(id);
-  el.className = barClass(pct);
-  el.firstElementChild.style.width = (pct == null ? 0 : Math.min(100, pct)) + '%';
+  el.textContent = msg || '';
+  el.className = 'msg ' + (ok ? 'ok' : msg ? 'err' : '');
 }
-function renderHardware(hw) {
-  if (!hw) {
-    document.getElementById('hw_ram').textContent = 'n/d';
-    document.getElementById('hw_pressure').textContent = '—';
-    return;
-  }
-  document.getElementById('hw_ram').textContent =
-    hw.ram_available_gb.toFixed(1) + ' / ' + hw.ram_total_gb.toFixed(1) + ' GB liberi · ' +
-    hw.ram_used_percent.toFixed(0) + '% usata';
-  setBar('hw_ram_bar', hw.ram_used_percent);
 
-  if (hw.gpu_total_gb) {
-    document.getElementById('hw_vram').textContent =
-      hw.gpu_free_gb.toFixed(1) + ' / ' + hw.gpu_total_gb.toFixed(1) + ' GB liberi · ' +
-      (hw.gpu_used_percent != null ? hw.gpu_used_percent.toFixed(0) + '%' : '—');
-    setBar('hw_vram_bar', hw.gpu_used_percent);
-  } else {
-    document.getElementById('hw_vram').textContent = 'n/d (CPU / Metal)';
-    setBar('hw_vram_bar', null);
-  }
-  document.getElementById('hw_cpu').textContent =
-    hw.load_per_core.toFixed(2) + ' (' + hw.cpu_count + ' core)';
-  document.getElementById('hw_swap').textContent =
-    hw.swap_used_gb.toFixed(1) + ' GB (' + hw.swap_used_percent.toFixed(0) + '%)';
-
-  const p = document.getElementById('hw_pressure');
-  if (hw.under_pressure) {
-    p.className = 'pressure-hot';
-    p.textContent = '⚠ Sotto pressione: ' + (hw.pressure_reason || '');
-  } else {
-    p.className = 'pressure-ok';
-    p.textContent = '✓ Risorse OK';
-  }
+function renderControl(ctrl) {
+  const st = (ctrl && ctrl.status) || 'idle';
+  const pill = document.getElementById('ctrl_status');
+  pill.textContent = st;
+  pill.className = 'pill ' + (st === 'running' ? 'pill-running' : st === 'paused' ? 'pill-paused' : 'pill-idle');
+  document.getElementById('ctrl_msg').textContent = (ctrl && ctrl.message) || '';
+  const running = st === 'running' || st === 'paused' || st === 'stopping';
+  document.getElementById('btn_start_n').disabled = running;
+  document.getElementById('btn_start_all').disabled = running;
+  document.getElementById('btn_pause').disabled = st !== 'running';
+  document.getElementById('btn_resume').disabled = st !== 'paused';
+  document.getElementById('btn_stop').disabled = !running;
 }
 
 function render(d) {
@@ -227,8 +240,7 @@ function render(d) {
   document.getElementById('locales_db').textContent = st.locales_in_db ?? '—';
   document.getElementById('locales_run').textContent = st.run_locales_count ?? '—';
   document.getElementById('visits').textContent = st.visits_in_db ?? '—';
-
-  renderHardware(d.hardware);
+  renderControl(d.control);
 
   const t = d.timing || {};
   document.getElementById('run_elapsed').textContent = fmt(t.run_elapsed_s);
@@ -303,10 +315,81 @@ function render(d) {
 
 async function poll() {
   try {
-    const r = await fetch('/api/state');
-    render(await r.json());
+    const d = await api('/api/state');
+    render(d);
   } catch (e) { console.error(e); }
 }
+
+async function ctrlAction(action, maxVideos) {
+  try {
+    const body = { action };
+    if (maxVideos != null) body.max_videos = maxVideos;
+    const r = await api('/api/control', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    setFeedback('ctrl_feedback', r.message, true);
+    poll();
+  } catch (e) {
+    setFeedback('ctrl_feedback', e.message, false);
+  }
+}
+
+async function loadDataFiles() {
+  const r = await api('/api/data');
+  const sel = document.getElementById('data_file');
+  sel.innerHTML = '';
+  (r.files || []).forEach(f => {
+    const o = document.createElement('option');
+    o.value = f; o.textContent = f;
+    sel.appendChild(o);
+  });
+}
+
+async function loadData() {
+  const name = document.getElementById('data_file').value;
+  if (!name) return;
+  try {
+    const r = await api('/api/data/' + encodeURIComponent(name));
+    document.getElementById('data_editor').value = r.content;
+    setFeedback('data_feedback', 'Caricato ' + name, true);
+  } catch (e) {
+    setFeedback('data_feedback', e.message, false);
+  }
+}
+
+async function saveData() {
+  const name = document.getElementById('data_file').value;
+  const raw = document.getElementById('data_editor').value;
+  if (!name) return;
+  try {
+    let content = raw;
+    if (!name.endsWith('.txt')) content = JSON.parse(raw);
+    const r = await api('/api/data/' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ content }),
+    });
+    setFeedback('data_feedback', r.message || 'Salvato', true);
+  } catch (e) {
+    setFeedback('data_feedback', e.message, false);
+  }
+}
+
+document.getElementById('btn_start_n').onclick = () => {
+  const n = parseInt(document.getElementById('max_videos').value, 10);
+  if (!n || n < 1) { setFeedback('ctrl_feedback', 'Inserisci un numero valido', false); return; }
+  ctrlAction('start', n);
+};
+document.getElementById('btn_start_all').onclick = () => ctrlAction('start', 0);
+document.getElementById('btn_pause').onclick = () => ctrlAction('pause');
+document.getElementById('btn_resume').onclick = () => ctrlAction('resume');
+document.getElementById('btn_stop').onclick = () => ctrlAction('stop');
+document.getElementById('btn_load_data').onclick = loadData;
+document.getElementById('btn_save_data').onclick = saveData;
+
+loadDataFiles();
 setInterval(poll, 2000);
 poll();
 </script>
@@ -317,16 +400,84 @@ poll();
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A003
-        pass  # quiet
+        pass
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path in ("/", "/index.html"):
+        path = urlparse(self.path).path
+        if path in ("/", "/index.html"):
             self._respond(200, "text/html; charset=utf-8", _HTML.encode("utf-8"))
-        elif self.path == "/api/state":
+        elif path == "/api/state":
             data = Dashboard.load_snapshot() or {}
-            self._respond(200, "application/json", json.dumps(data, ensure_ascii=False).encode("utf-8"))
+            data["control"] = sync_status()
+            self._json(data)
+        elif path == "/api/data":
+            self._json({"files": sorted(EDITABLE_FILES.keys())})
+        elif path.startswith("/api/data/"):
+            name = unquote(path.split("/api/data/", 1)[1])
+            try:
+                content, kind = read_editable(name)
+                if kind == "json":
+                    self._json({"name": name, "kind": kind, "content": json.dumps(content, ensure_ascii=False, indent=2)})
+                else:
+                    self._json({"name": name, "kind": kind, "content": content})
+            except KeyError:
+                self._json({"error": "File non consentito"}, status=404)
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
         else:
             self.send_error(404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        body = self._read_json()
+
+        if path == "/api/control":
+            action = (body or {}).get("action", "")
+            try:
+                if action == "start":
+                    mv = int((body or {}).get("max_videos", 0))
+                    ok, msg = start_pipeline(max_videos=max(0, mv))
+                elif action == "pause":
+                    ok, msg = request_pause()
+                elif action == "resume":
+                    ok, msg = request_resume()
+                elif action == "stop":
+                    ok, msg = request_stop()
+                else:
+                    self._json({"error": "Azione sconosciuta"}, status=400)
+                    return
+                self._json({"ok": ok, "message": msg, "control": sync_status()})
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+            return
+
+        if path.startswith("/api/data/"):
+            name = unquote(path.split("/api/data/", 1)[1])
+            try:
+                write_editable(name, (body or {}).get("content"))
+                self._json({"ok": True, "message": f"Salvato {name}"})
+            except KeyError:
+                self._json({"error": "File non consentito"}, status=404)
+            except (ValueError, TypeError) as e:
+                self._json({"error": str(e)}, status=400)
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
+            return
+
+        self.send_error(404)
+
+    def _read_json(self) -> dict | None:
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+    def _json(self, data: dict, *, status: int = 200) -> None:
+        self._respond(status, "application/json", json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
     def _respond(self, code: int, ctype: str, body: bytes) -> None:
         self.send_response(code)

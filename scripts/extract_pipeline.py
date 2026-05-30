@@ -88,8 +88,8 @@ def _is_protected_name(name: str, video_intel: VideoIntel | None) -> bool:
     return False
 
 
-def _chapter_start_time(name: str, video_intel: VideoIntel | None) -> float | None:
-    """Return the chapter start_time for a matched venue hint, if available."""
+def _hint_start_time(name: str, video_intel: VideoIntel | None) -> float | None:
+    """Return start_time from chapter or description-timestamp hint."""
     if not video_intel or not video_intel.venue_hints:
         return None
 
@@ -97,7 +97,7 @@ def _chapter_start_time(name: str, video_intel: VideoIntel | None) -> float | No
     best: float | None = None
     best_score = 0
     for h in video_intel.venue_hints:
-        if h.get("source") != "chapter":
+        if h.get("source") not in ("chapter", "description_timestamp"):
             continue
         hn = (h.get("name") or "").lower().strip()
         if not hn:
@@ -105,7 +105,9 @@ def _chapter_start_time(name: str, video_intel: VideoIntel | None) -> float | No
         score = fuzz.ratio(nl, hn)
         if score > best_score and (score >= 75 or hn in nl or nl in hn):
             best_score = score
-            best = h.get("start_time")
+            st = h.get("start_time")
+            if st is not None:
+                best = float(st)
     return best
 
 
@@ -153,6 +155,63 @@ def _detail_llm(
     except Exception as e:
         logger.warning(f"Detail LLM failed for '{place}': {e}")
         return {}
+
+
+def _visit_confidence(conf: float, ner_score: float, src: str) -> float:
+    bonus = 0.08 if src == "rule" else 0.05 if src == "llm" else 0.0
+    return _norm_confidence(min(1.0, conf * 0.65 + ner_score * 0.35 + bonus))
+
+
+def _promote_venue_hints(
+    video_intel: VideoIntel | None,
+    channel_rubriche: list[str],
+    extractions: list[dict],
+    flagged: list[dict],
+) -> None:
+    """Turn high-confidence title/chapter/description hints into extractions."""
+    if not video_intel or not video_intel.venue_hints:
+        return
+
+    seen = {_normalize_name(e["locale_name"]) for e in extractions}
+    conf_map = {"very_high": 0.88, "high": 0.82, "medium": 0.72}
+
+    rubrica = channel_rubriche[0] if channel_rubriche else ""
+    if video_intel.series_name:
+        rubrica = video_intel.series_name
+
+    for h in video_intel.venue_hints:
+        name = _clean_locale_name(str(h.get("name") or ""))
+        if not _is_valid_locale_name(name):
+            continue
+        norm = _normalize_name(name)
+        if norm in seen:
+            continue
+
+        conf = conf_map.get(str(h.get("confidence") or ""), 0.68)
+        start = h.get("start_time")
+        row = {
+            "locale_name": name,
+            "address": str(h.get("address") or "").strip(),
+            "city": video_intel.city or "",
+            "category": ["ristorante"],
+            "rating": None,
+            "sentiment": "neutral",
+            "notes": f"Promosso da hint {h.get('source', '?')}",
+            "rubrica": rubrica,
+            "confidence": conf,
+            "chunk_start": seconds_to_timestamp(float(start or 0)),
+            "chunk_end": seconds_to_timestamp(float(start or 0) + 90),
+            "chunk_start_seconds": float(start or 0),
+            "mention_time": float(start or 0),
+            "mention_timestamp": seconds_to_timestamp(float(start or 0)),
+            "verified": False,
+        }
+
+        if conf >= CONFIDENCE_THRESHOLD:
+            extractions.append(row)
+        else:
+            flagged.append({**row, "_flag_reason": "hint_low_confidence"})
+        seen.add(norm)
 
 
 def _norm_confidence(x: object) -> float:
@@ -262,9 +321,7 @@ def extract_from_video(
                 "sentiment": _normalize_sentiment(detail.get("sentiment")),
                 "notes": notes_merged,
                 "rubrica": rubrica,
-                "confidence": _norm_confidence(
-                    min(1.0, conf * 0.55 + cand.ner_score * 0.45 + (0.05 if src == "rule" else 0))
-                ),
+                "confidence": _visit_confidence(conf, cand.ner_score, src),
                 "chunk_start": chunk.get("start_timestamp", "0:00"),
                 "chunk_end": chunk.get("end_timestamp", "0:00"),
                 "chunk_start_seconds": cand.start_time,
@@ -276,7 +333,7 @@ def extract_from_video(
                 row["city"] = video_intel.city
 
             # If a chapter hint provides a precise start time, prefer it over ASR-derived time.
-            chapter_ts = _chapter_start_time(name_clean, video_intel)
+            chapter_ts = _hint_start_time(name_clean, video_intel)
             if chapter_ts is not None:
                 row["mention_time"] = chapter_ts
                 row["chunk_start_seconds"] = chapter_ts
@@ -302,9 +359,14 @@ def extract_from_video(
     for norm, group in by_norm.items():
         chunks_seen = {h["chunk_index"] for h in group}
         prot = any(h["protected"] for h in group)
+        llm_ok = any(h["row"].get("verified") for h in group)
         if not prot and len(chunks_seen) < 2:
             best_try = max(group, key=lambda x: x["row"]["confidence"])
-            fe = dict(best_try["row"])
+            row = best_try["row"]
+            if llm_ok or float(row.get("confidence", 0)) >= CONFIDENCE_THRESHOLD:
+                extractions.append(row)
+                continue
+            fe = dict(row)
             fe["confidence"] = min(float(fe.get("confidence", 0.5)), 0.55)
             fe["_flag_reason"] = "single_chunk_visit"
             flagged.append(fe)
@@ -312,6 +374,8 @@ def extract_from_video(
 
         best = max(group, key=lambda x: x["row"]["confidence"])
         extractions.append(best["row"])
+
+    _promote_venue_hints(video_intel, channel_rubriche, extractions, flagged)
 
     # Threshold split
     hi: list[dict] = []

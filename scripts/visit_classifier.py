@@ -25,6 +25,10 @@ FOOD_LEXICON = frozenset({
     "hamburger", "burger", "bistecca", "pesce", "fritto", "fritti", "dolce",
     "caffe", "caffè", "vino", "birra", "antipasto", "primo", "secondo", "contorno",
     "piatto", "porzione", "menu", "rosticceria", "forno", "pane", "pasticcino",
+    "trapizzino", "panzerotto", "porchetta", "montanara", "parmigiana", "amatriciana",
+    "cacio", "pepe", "gricia", "gnocco", "pinsa", "focaccia", "crescentina",
+    "tiramisù", "cannolo", "arancina", "calzone", "frittatina", "zeppola",
+    "tartare", "crudo", "salame", "prosciutto", "mozzarella", "burrata",
 })
 
 MENTION_PATTERNS = [
@@ -202,7 +206,7 @@ def classify_with_llm(
             return False, "", 0.45
         visit = bool(data.get("visit"))
         ev = str(data.get("evidence", "")).strip()[:500]
-        conf = 0.78 if visit else 0.72
+        conf = 0.85 if visit else 0.72
         return visit, ev, conf
     except Exception as e:
         logger.warning(f"LLM visit classify failed: {e}")
