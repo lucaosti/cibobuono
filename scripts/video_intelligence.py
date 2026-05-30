@@ -334,3 +334,74 @@ def analyze_chapters(chapters: list[dict], intel: VideoIntel) -> VideoIntel:
         logger.info(f"Chapters: {added} venue hints added")
 
     return intel
+
+
+# Patterns in comments that often name venues
+_COMMENT_VENUE_PATTERNS = [
+    re.compile(
+        r"(?:siamo stati|andate|consiglio|top|il miglior(?:e)?)\s+(?:da|al|alla|in)\s+"
+        r"([A-ZÀ-Ú][\w\s'&.-]{2,40})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"@([A-ZÀ-Ú][\w\s'&.-]{2,35})",
+    ),
+    re.compile(
+        r"(?:pizzeria|trattoria|forno|osteria|bar)\s+([A-ZÀ-Ú][\w\s'&.-]{2,35})",
+        re.IGNORECASE,
+    ),
+]
+
+
+def analyze_comments(comments: list[dict], intel: VideoIntel) -> VideoIntel:
+    """Extract venue hints from YouTube comments (crowd-sourced names)."""
+    if not comments:
+        return intel
+
+    existing = {h["name"].lower() for h in intel.venue_hints}
+    mention_counts: dict[str, int] = {}
+
+    for c in comments:
+        text = c.get("text") or ""
+        if len(text) < 8:
+            continue
+        for pat in _COMMENT_VENUE_PATTERNS:
+            for m in pat.finditer(text):
+                name = m.group(1).strip(" .,!?:;")
+                if len(name) < 3 or name.lower() in existing:
+                    continue
+                key = name.lower()
+                mention_counts[key] = mention_counts.get(key, 0) + 1 + (1 if c.get("like_count", 0) >= 5 else 0)
+
+    added = 0
+    for key, count in sorted(mention_counts.items(), key=lambda x: -x[1]):
+        if count < 2:
+            continue
+        # Recover original casing from first matching comment
+        display = key.title()
+        for c in comments:
+            if key in (c.get("text") or "").lower():
+                for pat in _COMMENT_VENUE_PATTERNS:
+                    m = pat.search(c["text"])
+                    if m and m.group(1).strip().lower() == key:
+                        display = m.group(1).strip()
+                        break
+                break
+        if display.lower() in existing:
+            continue
+        intel.venue_hints.append(
+            {
+                "name": display,
+                "source": "comment",
+                "confidence": "high" if count >= 4 else "medium",
+            }
+        )
+        existing.add(display.lower())
+        added += 1
+        if added >= 8:
+            break
+
+    if added:
+        logger.info(f"Comments: {added} venue hints from {len(comments)} comments")
+
+    return intel

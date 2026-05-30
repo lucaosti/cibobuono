@@ -405,6 +405,7 @@ def run_pipeline(
                     from scripts.fetch_videos import (
                         fetch_video_description,
                         fetch_video_metadata,
+                        fetch_video_comments,
                         detect_non_food_video,
                     )
                     from scripts.video_intelligence import (
@@ -412,6 +413,7 @@ def run_pipeline(
                         analyze_description,
                         analyze_description_timestamps,
                         analyze_chapters,
+                        analyze_comments,
                         parse_description_timestamps,
                     )
 
@@ -439,11 +441,17 @@ def run_pipeline(
                     video_intel = analyze_description_timestamps(dts, video_intel)
                     video_intel = analyze_chapters(chapters, video_intel)
 
+                    comments = fetch_video_comments(video_id)
+                    if comments:
+                        video_intel = analyze_comments(comments, video_intel)
+                        _log(f"  Comments: {len(comments)} read, hints now {len(video_intel.venue_hints)}")
+
                     dash.set_video_sources(
                         description_chars=len(video_description or ""),
                         chapters_count=len(chapters),
                         description_timestamps_count=len(dts),
                         venue_hints_count=len(video_intel.venue_hints),
+                        comments_count=len(comments),
                         intel_city=video_intel.city or "",
                         intel_type=video_intel.video_type or "",
                         intel_series=video_intel.series_name or "",

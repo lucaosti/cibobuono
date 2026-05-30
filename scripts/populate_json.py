@@ -97,12 +97,17 @@ def create_flagged_segment(
 
     if reason is None:
         flag = extraction.get("_flag_reason", "")
-        if flag == "geocoding_failed":
-            reason = FlagReason.GEOCODING_FAILED.value
-        elif flag == "osm_not_found":
-            reason = FlagReason.OSM_NOT_FOUND.value
-        elif flag == "rating_mismatch_title":
-            reason = FlagReason.RATING_TITLE_MISMATCH.value
+        reason_map = {
+            "geocoding_failed": FlagReason.GEOCODING_FAILED.value,
+            "osm_not_found": FlagReason.OSM_NOT_FOUND.value,
+            "rating_mismatch_title": FlagReason.RATING_TITLE_MISMATCH.value,
+            "single_chunk_visit": FlagReason.AMBIGUOUS_LOCALE.value,
+            "low_confidence": FlagReason.LOW_CONFIDENCE.value,
+            "hint_low_confidence": FlagReason.LOW_CONFIDENCE.value,
+            "possible_locale_mention_low_confidence": FlagReason.LOW_CONFIDENCE.value,
+        }
+        if flag in reason_map:
+            reason = reason_map[flag]
         elif not extraction.get("locale_name"):
             reason = FlagReason.MISSING_NAME.value
         elif not extraction.get("city") and not extraction.get("address"):

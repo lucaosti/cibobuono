@@ -326,6 +326,64 @@ def fetch_video_description(video_id: str) -> str:
     return ""
 
 
+def fetch_video_comments(video_id: str, max_comments: int = 40) -> list[dict]:
+    """Fetch top YouTube comments via yt-dlp (cached). Used for venue hints."""
+    cache_path = CACHE_DIR / f"{video_id}_comments.json"
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return data.get("comments") or []
+        except json.JSONDecodeError:
+            pass
+
+    comments: list[dict] = []
+    try:
+        result = subprocess.run(
+            [
+                *yt_dlp_command(),
+                "--skip-download",
+                "--dump-single-json",
+                "--quiet",
+                "--no-warnings",
+                "--extractor-args",
+                f"youtube:max-comments={max_comments}",
+                *YOUTUBE_EXTRACTOR_ARGS,
+                f"https://youtu.be/{video_id}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            logger.debug(f"No comments for {video_id}")
+            cache_path.write_text(json.dumps({"comments": []}, indent=2), encoding="utf-8")
+            return []
+
+        raw = json.loads(result.stdout.strip().split("\n", 1)[0])
+        for c in raw.get("comments") or []:
+            if not isinstance(c, dict):
+                continue
+            text = (c.get("text") or "").strip()
+            if len(text) < 4:
+                continue
+            comments.append(
+                {
+                    "text": text,
+                    "author": (c.get("author") or "").strip(),
+                    "like_count": int(c.get("like_count") or 0),
+                }
+            )
+        cache_path.write_text(
+            json.dumps({"comments": comments}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(f"Fetched {len(comments)} comments for {video_id}")
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+        logger.warning(f"Could not fetch comments for {video_id}: {e}")
+
+    return comments
+
+
 def download_audio(video_id: str, video_url: str) -> Path | None:
     """Download audio as WAV for Whisper. Returns path or None on failure."""
     ensure_dirs()

@@ -77,6 +77,7 @@ class VideoSourcesInfo:
     intel_series: str = ""
     transcript_source: str = ""  # faster_whisper | youtube_subs_manual | cached | ""
     transcript_chars: int = 0
+    comments_count: int = 0
     uses_ner: bool = False
     uses_llm: bool = False
     food_gate: str = ""
@@ -92,6 +93,8 @@ class LocaleHit:
     flag_reason: str | None = None
     video_id: str = ""
     video_title: str = ""
+    youtube_url: str = ""
+    mention_timestamp: str = ""
 
 
 @dataclass
@@ -259,6 +262,9 @@ class Dashboard:
         flagged = flagged or []
         hits: list[LocaleHit] = []
         for e in extractions:
+            mt = e.get("mention_time", e.get("chunk_start_seconds", 0))
+            yt = f"https://youtu.be/{self.state.current_video_id}?t={int(mt or 0)}"
+            ts = e.get("mention_timestamp") or e.get("chunk_start", "")
             hits.append(
                 LocaleHit(
                     name=str(e.get("locale_name", "?")),
@@ -268,9 +274,14 @@ class Dashboard:
                     flagged=False,
                     video_id=self.state.current_video_id,
                     video_title=self.state.current_video_title[:120],
+                    youtube_url=yt,
+                    mention_timestamp=str(ts),
                 )
             )
         for e in flagged:
+            mt = e.get("mention_time", e.get("chunk_start_seconds", 0))
+            yt = f"https://youtu.be/{self.state.current_video_id}?t={int(mt or 0)}"
+            ts = e.get("mention_timestamp") or e.get("chunk_start", "")
             hits.append(
                 LocaleHit(
                     name=str(e.get("locale_name", "?")),
@@ -281,6 +292,8 @@ class Dashboard:
                     flag_reason=e.get("_flag_reason"),
                     video_id=self.state.current_video_id,
                     video_title=self.state.current_video_title[:120],
+                    youtube_url=yt,
+                    mention_timestamp=str(ts),
                 )
             )
         self.state.current_extractions = hits
@@ -513,6 +526,8 @@ class Dashboard:
                 )
             if src.venue_hints_count:
                 sources_lines.append(f"\n  Hint locali titolo/desc ({src.venue_hints_count})")
+            if src.comments_count:
+                sources_lines.append(f"\n  Commenti YouTube ({src.comments_count})")
             if src.transcript_source:
                 sources_lines.append(
                     f"\n  Trascrizione: {src.transcript_source} ({src.transcript_chars} char)"

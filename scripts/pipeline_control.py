@@ -36,6 +36,8 @@ from scripts.utils import (
     save_json,
 )
 
+from scripts.review_queue import LOCALE_REPORTS_JSON
+
 CONTROL_PATH = LOGS_DIR / "pipeline_control.json"
 PID_PATH = LOGS_DIR / "pipeline.pid"
 
@@ -49,6 +51,7 @@ EDITABLE_FILES: dict[str, Path] = {
     "flagged_segments.json": FLAGGED_SEGMENTS_JSON,
     "skipped_videos.json": SKIPPED_VIDEOS_JSON,
     "corrections.json": CORRECTIONS_JSON,
+    "locale_reports.json": LOCALE_REPORTS_JSON,
 }
 
 
