@@ -688,7 +688,14 @@ def build_web_state(snapshot: dict | None, *, pipeline_running: bool) -> dict:
 
     if not pipeline_running:
         base["phase"] = "Idle"
-        base["stale_snapshot"] = bool(snapshot)
+        snap_phase = (snapshot or {}).get("phase", "Idle")
+        had_run = bool(
+            (snapshot or {}).get("run_locales")
+            or (snapshot or {}).get("recent_videos")
+            or ((snapshot or {}).get("current_video") or {}).get("video_id")
+            or snap_phase not in ("Idle", "")
+        )
+        base["stale_snapshot"] = had_run
         base["run_locales"] = []
         base["recent_videos"] = []
         base["current_video"] = {

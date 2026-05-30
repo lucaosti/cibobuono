@@ -109,6 +109,9 @@ def test_build_web_state_hides_stale_run(dash: Dashboard, monkeypatch: pytest.Mo
     assert idle["run_locales"] == []
     assert idle["stale_snapshot"] is True
 
+    clean = build_web_state({"phase": "Idle", "stats": {}}, pipeline_running=False)
+    assert clean["stale_snapshot"] is False
+
     live = build_web_state(stale, pipeline_running=True)
     assert live["phase"] == "Complete ✓"
     assert len(live["run_locales"]) == 1
