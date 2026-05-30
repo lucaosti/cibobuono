@@ -66,3 +66,29 @@ def test_candidate_dataclass_fields():
         ner_score=0.9,
     )
     assert c.chunk_index == 3
+
+
+def test_parallel_ner_all_chunks(monkeypatch):
+    monkeypatch.setattr("scripts.ner_candidates.get_gliner", lambda: None)
+
+    chunks = [
+        {
+            "chunk_index": 0,
+            "start_time": 0.0,
+            "text": "Siamo da Forno Rossi a Roma.",
+            "segment_timestamps": [(0.0, "Siamo da Forno Rossi a Roma.")],
+        },
+        {
+            "chunk_index": 1,
+            "start_time": 90.0,
+            "text": "Poi andiamo da Pizzeria Bianchi.",
+            "segment_timestamps": [(90.0, "Poi andiamo da Pizzeria Bianchi.")],
+        },
+    ]
+    from scripts.ner_candidates import extract_all_chunks_candidates
+
+    out = extract_all_chunks_candidates(chunks, max_workers=2)
+    assert 0 in out and 1 in out
+    names = {v.name for venues, _ in out.values() for v in venues}
+    assert any("Rossi" in n or "Forno" in n for n in names)
+    assert any("Bianchi" in n for n in names)

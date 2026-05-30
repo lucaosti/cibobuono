@@ -11,12 +11,14 @@ __author__ = "Luca Ostinelli"
 
 
 import json
+import os
 import re
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from thefuzz import fuzz
 
+from scripts.batch_visit_llm import BatchEvalResult, batch_evaluate_candidates
 from scripts.chunk_transcription import seconds_to_timestamp
 from scripts.extract_locales import (
     LLM_MAX_TOKENS,
@@ -28,19 +30,37 @@ from scripts.extract_locales import (
     get_llm,
 )
 from scripts.utils import CONFIDENCE_THRESHOLD
-from scripts.ner_candidates import Candidate, extract_chunk_candidates
+from scripts.ner_candidates import Candidate, extract_all_chunks_candidates
 from scripts.utils import setup_logging
 from scripts.venue_discovery import discover_venues_llm
 from scripts.visit_classifier import (
     classify_candidate,
+    classify_visit_rules,
     get_transcript_window,
     verify_venue_name,
+    _looks_like_venue_name,
 )
 
 if TYPE_CHECKING:
     from scripts.video_intelligence import VideoIntel
 
 logger = setup_logging("extract_pipeline")
+
+DEFAULT_BATCH_SIZE = 10
+
+
+def _batch_llm_enabled() -> bool:
+    raw = os.environ.get("CIBOBUONO_BATCH_LLM", "auto").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    try:
+        from scripts.hardware import get_profile
+
+        return get_profile().has_cuda
+    except Exception:
+        return True
 
 _DETAIL_SYSTEM = (
     "You extract structured fields for ONE food venue from an Italian vlog excerpt. "
@@ -275,6 +295,94 @@ def _merge_extraction_rows(
     return [merged[k] for k in merged if k not in drop]
 
 
+def _build_visit_row(
+    cand: Candidate,
+    chunk: dict,
+    *,
+    evidence: str,
+    conf: float,
+    src: str,
+    detail: dict,
+    channel_rubriche: list[str],
+    video_intel: VideoIntel | None,
+    video_title: str,
+) -> dict:
+    name_clean = _clean_locale_name(cand.name)
+    rubrica = channel_rubriche[0] if channel_rubriche else ""
+    if video_intel and video_intel.series_name:
+        rubrica = video_intel.series_name
+
+    notes_parts = [evidence] if evidence else []
+    dn = (detail.get("notes") or "").strip()
+    if dn:
+        notes_parts.append(dn)
+    notes_merged = " | ".join(notes_parts)[:1500]
+
+    cat = detail.get("category")
+    if not isinstance(cat, list) or not cat:
+        cat = _label_to_category(cand.label)
+
+    row = {
+        "locale_name": name_clean,
+        "address": str(detail.get("address") or "").strip(),
+        "city": str(detail.get("city") or "").strip(),
+        "category": cat,
+        "rating": _normalize_rating(detail.get("rating")),
+        "sentiment": _normalize_sentiment(detail.get("sentiment")),
+        "notes": notes_merged,
+        "rubrica": rubrica,
+        "confidence": _visit_confidence(conf, cand.ner_score, src),
+        "chunk_start": chunk.get("start_timestamp", "0:00"),
+        "chunk_end": chunk.get("end_timestamp", "0:00"),
+        "chunk_start_seconds": cand.start_time,
+        "mention_time": cand.start_time,
+        "mention_timestamp": seconds_to_timestamp(cand.start_time),
+        "verified": src == "llm",
+    }
+    if video_intel and video_intel.city and not row["city"]:
+        row["city"] = video_intel.city
+
+    chapter_ts = _hint_start_time(name_clean, video_intel)
+    if chapter_ts is not None:
+        row["mention_time"] = chapter_ts
+        row["chunk_start_seconds"] = chapter_ts
+        row["mention_timestamp"] = seconds_to_timestamp(chapter_ts)
+        row["chunk_start"] = seconds_to_timestamp(chapter_ts)
+        row["chunk_end"] = seconds_to_timestamp(chapter_ts + 90)
+    return row
+
+
+def _append_flagged_candidate(
+    flagged: list[dict],
+    cand: Candidate,
+    chunk: dict,
+    *,
+    evidence: str,
+    conf: float,
+    reason: str,
+) -> None:
+    name_clean = _clean_locale_name(cand.name)
+    flagged.append(
+        {
+            "locale_name": name_clean,
+            "city": "",
+            "address": "",
+            "category": _label_to_category(cand.label),
+            "rating": None,
+            "sentiment": "neutral",
+            "notes": evidence[:500],
+            "rubrica": "",
+            "confidence": max(0.25, 1.0 - conf),
+            "chunk_start": chunk.get("start_timestamp", "0:00"),
+            "chunk_end": chunk.get("end_timestamp", "0:00"),
+            "chunk_start_seconds": cand.start_time,
+            "mention_time": cand.start_time,
+            "mention_timestamp": seconds_to_timestamp(cand.start_time),
+            "_flag_reason": reason,
+        }
+    )
+
+
 def extract_from_video(
     video_id: str,
     chunks: list[dict],
@@ -314,8 +422,14 @@ def extract_from_video(
     visit_hits: list[dict] = []
     flagged: list[dict] = []
 
-    for chunk in chunks:
-        venues, ctx_ents = extract_chunk_candidates(chunk)
+    chunk_by_index = {int(c.get("chunk_index", i)): c for i, c in enumerate(chunks)}
+    chunk_ner = extract_all_chunks_candidates(chunks)
+
+    batch_items: list[dict] = []
+    batch_meta: list[dict] = []
+
+    for chunk_idx, (venues, ctx_ents) in chunk_ner.items():
+        chunk = chunk_by_index.get(chunk_idx, chunks[0] if chunks else {})
         ctx_by_label: dict[str, set[str]] = defaultdict(set)
         for c in ctx_ents:
             ctx_by_label[c.label].add(c.name.lower().strip())
@@ -329,99 +443,122 @@ def extract_from_video(
             if not window:
                 window = chunk.get("text", "")[:2000]
 
-            # Stage 1 — verify the candidate is actually a venue proper name
-            # (rejects dishes, people, cities, generic words) before the more
-            # expensive visit classification. Precision-first.
-            if not verify_venue_name(llm, name_clean, window):
+            if not _looks_like_venue_name(name_clean):
                 continue
 
-            # Stage 2 — is the host actually visiting this venue here?
+            decision, reason = classify_visit_rules(window, cand, ctx_by_label)
+            if decision == "visit":
+                detail_window = get_transcript_window(transcript, cand.start_time, 22.0) or window
+                detail = _detail_llm(llm, detail_window, name_clean, video_title) if llm else {}
+                row = _build_visit_row(
+                    cand,
+                    chunk,
+                    evidence=f"[rule:{reason}]",
+                    conf=0.82,
+                    src="rule",
+                    detail=detail,
+                    channel_rubriche=channel_rubriche,
+                    video_intel=video_intel,
+                    video_title=video_title,
+                )
+                visit_hits.append(
+                    {
+                        "norm": _normalize_name(name_clean),
+                        "chunk_index": chunk_idx,
+                        "row": row,
+                        "protected": _is_protected_name(name_clean, video_intel),
+                    }
+                )
+                continue
+
+            if decision == "mention":
+                continue
+
+            cid = f"c{len(batch_items)}"
+            batch_items.append({"id": cid, "name": name_clean, "window": window})
+            batch_meta.append(
+                {
+                    "id": cid,
+                    "cand": cand,
+                    "chunk": chunk,
+                    "ctx_by_label": ctx_by_label,
+                    "window": window,
+                    "reason": reason,
+                }
+            )
+
+    batch_results: dict[str, BatchEvalResult] = {}
+    if batch_meta and llm and _batch_llm_enabled():
+        batch_size = int(os.environ.get("CIBOBUONO_BATCH_LLM_SIZE", str(DEFAULT_BATCH_SIZE)))
+        batch_results = batch_evaluate_candidates(
+            llm,
+            batch_items,
+            video_title=video_title,
+            batch_size=batch_size,
+        )
+        logger.info(
+            f"Batch LLM: {len(batch_items)} candidates in "
+            f"{max(1, (len(batch_items) + batch_size - 1) // batch_size)} call(s)"
+        )
+
+    for meta in batch_meta:
+        cand = meta["cand"]
+        chunk = meta["chunk"]
+        ctx_by_label = meta["ctx_by_label"]
+        window = meta["window"]
+        name_clean = _clean_locale_name(cand.name)
+        cid = meta["id"]
+
+        if batch_results:
+            ev = batch_results.get(cid)
+            if ev is None:
+                continue
+            if not ev.is_venue:
+                continue
+            is_visit = ev.is_visit
+            evidence = ev.evidence or f"[batch:{meta['reason']}]"
+            conf = 0.85 if is_visit else 0.72
+            src = "llm"
+        else:
+            if not verify_venue_name(llm, name_clean, window):
+                continue
             is_visit, evidence, conf, src = classify_candidate(
                 window, cand, ctx_by_label, llm
             )
 
-            if not is_visit:
-                if cand.ner_score >= 0.42:
-                    flagged.append(
-                        {
-                            "locale_name": name_clean,
-                            "city": "",
-                            "address": "",
-                            "category": _label_to_category(cand.label),
-                            "rating": None,
-                            "sentiment": "neutral",
-                            "notes": evidence[:500],
-                            "rubrica": "",
-                            "confidence": max(0.25, 1.0 - conf),
-                            "chunk_start": chunk.get("start_timestamp", "0:00"),
-                            "chunk_end": chunk.get("end_timestamp", "0:00"),
-                            "chunk_start_seconds": cand.start_time,
-                            "mention_time": cand.start_time,
-                            "mention_timestamp": seconds_to_timestamp(cand.start_time),
-                            "_flag_reason": "possible_locale_mention_low_confidence",
-                        }
-                    )
-                continue
+        if not is_visit:
+            if cand.ner_score >= 0.42:
+                _append_flagged_candidate(
+                    flagged,
+                    cand,
+                    chunk,
+                    evidence=evidence,
+                    conf=conf,
+                    reason="possible_locale_mention_low_confidence",
+                )
+            continue
 
-            detail_window = get_transcript_window(transcript, cand.start_time, 22.0)
-            if not detail_window:
-                detail_window = window
-
-            detail = _detail_llm(llm, detail_window, name_clean, video_title) if llm else {}
-
-            rubrica = ""
-            if channel_rubriche:
-                rubrica = channel_rubriche[0]
-            if video_intel and video_intel.series_name:
-                rubrica = video_intel.series_name
-
-            notes_parts = [evidence] if evidence else []
-            dn = (detail.get("notes") or "").strip()
-            if dn:
-                notes_parts.append(dn)
-            notes_merged = " | ".join(notes_parts)[:1500]
-
-            cat = detail.get("category")
-            if not isinstance(cat, list) or not cat:
-                cat = _label_to_category(cand.label)
-
-            row = {
-                "locale_name": name_clean,
-                "address": str(detail.get("address") or "").strip(),
-                "city": str(detail.get("city") or "").strip(),
-                "category": cat,
-                "rating": _normalize_rating(detail.get("rating")),
-                "sentiment": _normalize_sentiment(detail.get("sentiment")),
-                "notes": notes_merged,
-                "rubrica": rubrica,
-                "confidence": _visit_confidence(conf, cand.ner_score, src),
-                "chunk_start": chunk.get("start_timestamp", "0:00"),
-                "chunk_end": chunk.get("end_timestamp", "0:00"),
-                "chunk_start_seconds": cand.start_time,
-                "mention_time": cand.start_time,
-                "mention_timestamp": seconds_to_timestamp(cand.start_time),
-                "verified": src == "llm",
+        detail_window = get_transcript_window(transcript, cand.start_time, 22.0) or window
+        detail = _detail_llm(llm, detail_window, name_clean, video_title) if llm else {}
+        row = _build_visit_row(
+            cand,
+            chunk,
+            evidence=evidence,
+            conf=conf,
+            src=src,
+            detail=detail,
+            channel_rubriche=channel_rubriche,
+            video_intel=video_intel,
+            video_title=video_title,
+        )
+        visit_hits.append(
+            {
+                "norm": _normalize_name(name_clean),
+                "chunk_index": int(chunk.get("chunk_index", 0)),
+                "row": row,
+                "protected": _is_protected_name(name_clean, video_intel),
             }
-            if video_intel and video_intel.city and not row["city"]:
-                row["city"] = video_intel.city
-
-            # If a chapter hint provides a precise start time, prefer it over ASR-derived time.
-            chapter_ts = _hint_start_time(name_clean, video_intel)
-            if chapter_ts is not None:
-                row["mention_time"] = chapter_ts
-                row["chunk_start_seconds"] = chapter_ts
-                row["mention_timestamp"] = seconds_to_timestamp(chapter_ts)
-                row["chunk_start"] = seconds_to_timestamp(chapter_ts)
-                row["chunk_end"] = seconds_to_timestamp(chapter_ts + 90)
-
-            visit_hits.append(
-                {
-                    "norm": _normalize_name(name_clean),
-                    "chunk_index": int(chunk.get("chunk_index", 0)),
-                    "row": row,
-                    "protected": _is_protected_name(name_clean, video_intel),
-                }
-            )
+        )
 
     # Cross-chunk consensus: keep if protected OR seen in >=2 chunks as visit
     by_norm: dict[str, list[dict]] = defaultdict(list)

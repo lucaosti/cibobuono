@@ -12,6 +12,8 @@ __author__ = "Luca Ostinelli"
 import json
 import os
 import re
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from thefuzz import fuzz
 
@@ -30,6 +32,8 @@ logger = setup_logging("extract")
 
 # Global LLM instance (loaded once per session)
 _llm_instance = None
+_llm_load_future: Future | None = None
+_llm_load_lock = threading.Lock()
 
 
 def _should_abort() -> bool:
@@ -55,9 +59,53 @@ def get_llm():
     Callers (``is_food_review_video``, ``visit_classifier.classify_candidate``)
     handle a None return gracefully and degrade to NER+rules-only extraction.
     """
-    global _llm_instance
+    global _llm_instance, _llm_load_future
+
     if _llm_instance is not None:
         return _llm_instance
+
+    with _llm_load_lock:
+        if _llm_instance is not None:
+            return _llm_instance
+        if _llm_load_future is not None:
+            fut = _llm_load_future
+        else:
+            return _load_llm_impl()
+
+    try:
+        loaded = fut.result()
+    except Exception as exc:
+        logger.error("Background LLM preload failed: %s", exc)
+        with _llm_load_lock:
+            _llm_load_future = None
+        return _load_llm_impl()
+
+    with _llm_load_lock:
+        if _llm_instance is None and loaded is not None:
+            _llm_instance = loaded
+        _llm_load_future = None
+    return _llm_instance
+
+
+def preload_llm(pool: ThreadPoolExecutor | None = None) -> None:
+    """Start loading the LLM on a background thread (e.g. while chunking after Whisper)."""
+    global _llm_load_future
+
+    if _llm_instance is not None:
+        return
+
+    with _llm_load_lock:
+        if _llm_instance is not None or _llm_load_future is not None:
+            return
+        target_pool = pool
+        if target_pool is None:
+            target_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm_preload")
+            _llm_load_future = target_pool.submit(_load_llm_impl)
+            return
+        _llm_load_future = target_pool.submit(_load_llm_impl)
+
+
+def _load_llm_impl():
 
     profile = get_profile()
     if not profile.enable_llm:
@@ -139,24 +187,28 @@ def get_llm():
 
     if extra_kwargs:
         try:
-            _llm_instance = Llama(**llm_kwargs, **extra_kwargs)
+            instance = Llama(**llm_kwargs, **extra_kwargs)
             logger.info("LLM loaded with flash attention + quantized KV cache (Metal)")
         except TypeError:
-            _llm_instance = Llama(**llm_kwargs)
+            instance = Llama(**llm_kwargs)
             logger.info("LLM loaded (advanced features not supported in this version)")
     else:
-        _llm_instance = Llama(**llm_kwargs)
+        instance = Llama(**llm_kwargs)
         logger.info("LLM loaded successfully")
 
-    return _llm_instance
+    return instance
 
 
 def release_llm() -> None:
     """Unload LLM from GPU/RAM so Whisper can use VRAM for the next video."""
-    global _llm_instance
-    if _llm_instance is None:
-        return
-    _llm_instance = None
+    global _llm_instance, _llm_load_future
+    with _llm_load_lock:
+        if _llm_load_future is not None:
+            _llm_load_future.cancel()
+            _llm_load_future = None
+        if _llm_instance is None:
+            return
+        _llm_instance = None
     try:
         import gc
         gc.collect()

@@ -13,7 +13,7 @@ __author__ = "Luca Ostinelli"
 import os
 from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from thefuzz import fuzz
 
@@ -34,6 +34,64 @@ def parallel_postprocess_enabled(has_cuda: bool) -> bool:
     if raw in ("1", "true", "yes", "on"):
         return True
     return has_cuda
+
+
+@dataclass
+class IntelPrepResult:
+    video_id: str
+    video_intel: Any | None = None
+    youtube_extra: dict | None = None
+    video_description: str = ""
+    comments_count: int = 0
+    error: str = ""
+
+
+def _prepare_video_intel(video_id: str, title: str) -> IntelPrepResult:
+    """Fetch metadata/comments and build VideoIntel (CPU + network, no GPU)."""
+    try:
+        from scripts.fetch_videos import (
+            fetch_video_description,
+            fetch_video_metadata,
+            fetch_video_comments,
+        )
+        from scripts.video_intelligence import (
+            analyze_title,
+            analyze_description,
+            analyze_description_timestamps,
+            analyze_chapters,
+            analyze_comments,
+            parse_description_timestamps,
+        )
+
+        ym = fetch_video_metadata(video_id)
+        video_description = fetch_video_description(video_id) or ym.get("description") or ""
+        chapters = ym.get("chapters") or []
+        dts = parse_description_timestamps(video_description)
+        youtube_extra = {
+            "chapters": chapters,
+            "description_timestamps": dts,
+        }
+
+        video_intel = analyze_title(title)
+        video_intel = analyze_description(video_description, video_intel)
+        video_intel = analyze_description_timestamps(dts, video_intel)
+        video_intel = analyze_chapters(chapters, video_intel)
+
+        comments = fetch_video_comments(video_id)
+        comments_count = len(comments)
+        if comments:
+            video_intel = analyze_comments(comments, video_intel)
+
+        return IntelPrepResult(
+            video_id=video_id,
+            video_intel=video_intel,
+            youtube_extra=youtube_extra,
+            video_description=video_description,
+            comments_count=comments_count,
+        )
+    except Exception as exc:
+        logger.warning("Intel prep failed for %s: %s", video_id, exc)
+        return IntelPrepResult(video_id=video_id, error=str(exc))
 
 
 @dataclass
@@ -222,6 +280,26 @@ class PipelineExecutor:
         )
         self._finalize_futures: list[Future] = []
         self._completed: list[FinalizeResult] = []
+        self._intel_futures: dict[str, Future] = {}
+
+    def schedule_intel_prep(self, video_id: str, title: str) -> None:
+        """Prefetch metadata + intel for a video while GPU works on another."""
+        if video_id in self._intel_futures:
+            return
+        self._intel_futures[video_id] = self._io_pool.submit(
+            _prepare_video_intel, video_id, title
+        )
+
+    def take_intel_prep(self, video_id: str, title: str) -> IntelPrepResult:
+        """Return prefetched intel, or compute synchronously if not scheduled."""
+        fut = self._intel_futures.pop(video_id, None)
+        if fut is None:
+            return _prepare_video_intel(video_id, title)
+        try:
+            return fut.result()
+        except Exception as exc:
+            logger.warning("Prefetched intel failed for %s: %s", video_id, exc)
+            return IntelPrepResult(video_id=video_id, error=str(exc))
 
     def schedule_io_prep(
         self,
@@ -300,5 +378,6 @@ class PipelineExecutor:
 
     def shutdown(self) -> None:
         self.drain_finalize()
+        self._intel_futures.clear()
         self._io_pool.shutdown(wait=False, cancel_futures=True)
         self._post_pool.shutdown(wait=True)

@@ -53,7 +53,10 @@ def test_pipeline_single_chunk_protected_keeps_visit():
     )
     mock_llm.create_chat_completion.return_value = {"choices": [{"message": {"content": detail_json}}]}
 
-    with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
+    with patch(
+        "scripts.extract_pipeline.extract_all_chunks_candidates",
+        return_value={0: ([fake_cand], [])},
+    ):
         with patch("scripts.extract_pipeline.get_llm", return_value=mock_llm):
             with patch("scripts.extract_pipeline.discover_venues_llm", return_value=[]):
                 with patch("scripts.extract_pipeline.classify_candidate", return_value=(True, "[rule:test]", 0.85, "rule")):
@@ -93,7 +96,10 @@ def test_pipeline_drops_belgium_name_drop_without_signals():
         ner_score=0.4,
     )
 
-    with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
+    with patch(
+        "scripts.extract_pipeline.extract_all_chunks_candidates",
+        return_value={0: ([fake_cand], [])},
+    ):
         with patch("scripts.extract_pipeline.get_llm", return_value=None):
             with patch("scripts.extract_pipeline.discover_venues_llm", return_value=[]):
                 with patch(
@@ -136,7 +142,10 @@ def test_pipeline_single_chunk_llm_keeps_visit():
         "choices": [{"message": {"content": '{"rating": "7", "sentiment": "positive", "notes": "carbonara", "category": ["trattoria"], "city": "Roma", "address": ""}'}}]
     }
 
-    with patch("scripts.extract_pipeline.extract_chunk_candidates", return_value=([fake_cand], [])):
+    with patch(
+        "scripts.extract_pipeline.extract_all_chunks_candidates",
+        return_value={0: ([fake_cand], [])},
+    ):
         with patch("scripts.extract_pipeline.get_llm", return_value=mock_llm):
             with patch("scripts.extract_pipeline.discover_venues_llm", return_value=[]):
                 with patch("scripts.extract_pipeline.verify_venue_name", return_value=True):

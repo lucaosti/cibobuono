@@ -50,3 +50,20 @@ def test_executor_submits_background_finalize():
         ex.drain_finalize()
         mock_fin.assert_called_once()
     ex.shutdown()
+
+
+def test_intel_prep_scheduled_and_taken():
+    ex = PipelineExecutor(parallel_postprocess=False, io_workers=2)
+    fake = __import__(
+        "scripts.pipeline_executor", fromlist=["IntelPrepResult"]
+    ).IntelPrepResult(
+        video_id="v3",
+        video_description="desc",
+        youtube_extra={"chapters": []},
+    )
+    with patch("scripts.pipeline_executor._prepare_video_intel", return_value=fake):
+        ex.schedule_intel_prep("v3", "Title")
+        result = ex.take_intel_prep("v3", "Title")
+    assert result.video_id == "v3"
+    assert result.video_description == "desc"
+    ex.shutdown()

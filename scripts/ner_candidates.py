@@ -9,7 +9,10 @@ from __future__ import annotations
 __author__ = "Luca Ostinelli"
 
 
+import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from scripts.utils import NER_MODEL_NAME, setup_logging
@@ -17,6 +20,7 @@ from scripts.utils import NER_MODEL_NAME, setup_logging
 logger = setup_logging("ner_candidates")
 
 _gliner_model = None
+_gliner_predict_lock = threading.Lock()
 
 # GLiNER often includes trigger words in the span; strip common Italian prefixes.
 _VENUE_PREFIX = re.compile(
@@ -163,6 +167,33 @@ def _patch_gliner_tokenizer() -> None:
     gt._cibobuono_patched = True
 
 
+def _gliner_use_cpu() -> bool:
+    mode = os.environ.get("CIBOBUONO_GLINER_CPU", "auto").strip().lower()
+    if mode in ("0", "false", "no", "off"):
+        return False
+    if mode in ("1", "true", "yes", "on"):
+        return True
+    try:
+        from scripts.hardware import get_profile
+
+        return get_profile().has_cuda
+    except Exception:
+        return False
+
+
+def _maybe_pin_gliner_cpu(model) -> None:
+    """Keep GLiNER off the CUDA device so Whisper/LLM can use the full GPU."""
+    if not _gliner_use_cpu():
+        return
+    try:
+        import torch
+
+        model.to(torch.device("cpu"))
+        logger.info("GLiNER pinned to CPU — GPU reserved for Whisper/LLM")
+    except Exception as e:
+        logger.debug(f"GLiNER CPU pin skipped: {e}")
+
+
 def get_gliner():
     """Lazy-load GLiNER model (cached process-wide)."""
     global _gliner_model
@@ -177,6 +208,7 @@ def get_gliner():
         _patch_gliner_tokenizer()
         logger.info(f"Loading GLiNER model: {NER_MODEL_NAME}")
         _gliner_model = GLiNER.from_pretrained(NER_MODEL_NAME)
+        _maybe_pin_gliner_cpu(_gliner_model)
         return _gliner_model
     except Exception as e:
         logger.warning(f"GLiNER load failed ({e}); heuristic fallback only")
@@ -258,7 +290,8 @@ def extract_chunk_candidates(
 
     if model is not None:
         try:
-            raw = model.predict_entities(text, NER_LABELS, threshold=threshold)
+            with _gliner_predict_lock:
+                raw = model.predict_entities(text, NER_LABELS, threshold=threshold)
         except Exception as e:
             logger.warning(f"GLiNER predict failed: {e}")
             raw = []
@@ -338,3 +371,30 @@ def extract_chunk_candidates(
             )
         )
     return venues, context
+
+
+def extract_all_chunks_candidates(
+    chunks: list[dict],
+    *,
+    max_workers: int | None = None,
+) -> dict[int, tuple[list[Candidate], list[Candidate]]]:
+    """Run NER on all chunks in parallel (CPU threads — GLiNER stays off GPU)."""
+    if max_workers is None:
+        max_workers = int(os.environ.get("CIBOBUONO_NER_WORKERS", "4"))
+
+    if len(chunks) <= 1 or max_workers <= 1:
+        return {
+            int(c.get("chunk_index", i)): extract_chunk_candidates(c)
+            for i, c in enumerate(chunks)
+        }
+
+    out: dict[int, tuple[list[Candidate], list[Candidate]]] = {}
+    workers = min(max_workers, len(chunks))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gliner") as pool:
+        futs = {pool.submit(extract_chunk_candidates, c): c for c in chunks}
+        for fut in as_completed(futs):
+            chunk = futs[fut]
+            idx = int(chunk.get("chunk_index", 0))
+            out[idx] = fut.result()
+    logger.info(f"Parallel NER: {len(chunks)} chunks with {workers} workers")
+    return out

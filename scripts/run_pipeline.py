@@ -350,9 +350,16 @@ def run_pipeline(
 
         from scripts.pipeline_executor import FinalizeJob, PipelineExecutor
 
+        io_workers = int(os.environ.get("CIBOBUONO_IO_WORKERS", "4"))
         executor = PipelineExecutor(
             parallel_postprocess=parallel_postprocess and not skip_extract,
+            io_workers=io_workers,
         )
+
+        # Prefetch intel for the first video while initial audio downloads run.
+        if not skip_extract and to_process:
+            v0 = to_process[0]
+            executor.schedule_intel_prep(v0["video_id"], v0.get("title", v0["video_id"]))
 
         # ── Sliding window: pre-download audio for first batch ────────
         prefetch_n = min(PREFETCH_WINDOW, len(to_process))
@@ -394,6 +401,11 @@ def run_pipeline(
 
             if executor:
                 executor.schedule_io_prep(to_process, i - 1, count=4)
+                if not skip_extract and i < len(to_process):
+                    nv = to_process[i]
+                    executor.schedule_intel_prep(
+                        nv["video_id"], nv.get("title", nv["video_id"])
+                    )
 
             if _pipeline_shutdown["graceful"]:
                 stopped_gracefully = True
@@ -467,65 +479,49 @@ def run_pipeline(
 
                 if not skip_extract:
                     dash.set_step("Video intel")
-                    from scripts.fetch_videos import (
-                        fetch_video_description,
-                        fetch_video_metadata,
-                        fetch_video_comments,
-                        detect_non_food_video,
-                    )
-                    from scripts.video_intelligence import (
-                        analyze_title,
-                        analyze_description,
-                        analyze_description_timestamps,
-                        analyze_chapters,
-                        analyze_comments,
-                        parse_description_timestamps,
-                    )
+                    from scripts.fetch_videos import detect_non_food_video
 
-                    ym = fetch_video_metadata(video_id)
-                    video_description = fetch_video_description(video_id)
-                    if not video_description and ym.get("description"):
-                        video_description = ym["description"]
+                    intel = executor.take_intel_prep(video_id, v_title)
+                    if intel.error and intel.video_intel is None:
+                        _log(f"  Intel prep error: {intel.error[:120]}")
+                    video_intel = intel.video_intel
+                    youtube_extra = intel.youtube_extra
+                    video_description = intel.video_description or ""
+                    comments: list = []
+
                     if video_description:
                         _log(f"  Video description: {len(video_description)} chars")
 
-                    chapters = ym.get("chapters") or []
-                    dts = parse_description_timestamps(video_description or "")
-                    youtube_extra = {
-                        "chapters": chapters,
-                        "description_timestamps": dts,
-                    }
+                    chapters = (youtube_extra or {}).get("chapters") or []
+                    dts = (youtube_extra or {}).get("description_timestamps") or []
                     if chapters or dts:
                         _log(
                             f"  YouTube extra: {len(chapters)} chapters, "
                             f"{len(dts)} description timestamps"
                         )
 
-                    video_intel = analyze_title(v_title)
-                    video_intel = analyze_description(video_description or "", video_intel)
-                    video_intel = analyze_description_timestamps(dts, video_intel)
-                    video_intel = analyze_chapters(chapters, video_intel)
+                    if intel.comments_count:
+                        _log(
+                            f"  Comments: {intel.comments_count} read, "
+                            f"hints now {len(video_intel.venue_hints) if video_intel else 0}"
+                        )
 
-                    comments = fetch_video_comments(video_id)
-                    if comments:
-                        video_intel = analyze_comments(comments, video_intel)
-                        _log(f"  Comments: {len(comments)} read, hints now {len(video_intel.venue_hints)}")
-
-                    dash.set_video_sources(
-                        description_chars=len(video_description or ""),
-                        chapters_count=len(chapters),
-                        description_timestamps_count=len(dts),
-                        venue_hints_count=len(video_intel.venue_hints),
-                        comments_count=len(comments),
-                        intel_city=video_intel.city or "",
-                        intel_type=video_intel.video_type or "",
-                        intel_series=video_intel.series_name or "",
-                        uses_ner=True,
-                        uses_llm=True,
-                    )
+                    if video_intel:
+                        dash.set_video_sources(
+                            description_chars=len(video_description or ""),
+                            chapters_count=len(chapters),
+                            description_timestamps_count=len(dts),
+                            venue_hints_count=len(video_intel.venue_hints),
+                            comments_count=intel.comments_count,
+                            intel_city=video_intel.city or "",
+                            intel_type=video_intel.video_type or "",
+                            intel_series=video_intel.series_name or "",
+                            uses_ner=True,
+                            uses_llm=True,
+                        )
 
                     # Title-based skip before Whisper
-                    if video_intel.video_type == "non_review" and video_intel.skip_reason:
+                    if video_intel and video_intel.video_type == "non_review" and video_intel.skip_reason:
                         _log(f"  ✗ Skipped (title analysis: non-review): {video_intel.skip_reason}")
                         update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
                         _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
@@ -534,8 +530,11 @@ def run_pipeline(
                         _dash_finish("processed")
                         continue
 
-                    _log(f"  Intel: type={video_intel.video_type}, city={video_intel.city}, "
-                         f"hints={len(video_intel.venue_hints)}")
+                    _log(
+                        f"  Intel: type={video_intel.video_type if video_intel else '?'}, "
+                        f"city={video_intel.city if video_intel else ''}, "
+                        f"hints={len(video_intel.venue_hints) if video_intel else 0}"
+                    )
 
                     # Description-based non-food skip before Whisper
                     is_nf, nf_reason = detect_non_food_video(v_title, video_description)
@@ -606,6 +605,10 @@ def run_pipeline(
                     from scripts.transcribe_video import release_whisper_model
 
                     release_whisper_model()
+                    if not skip_extract and profile.has_cuda:
+                        from scripts.extract_locales import preload_llm
+
+                        preload_llm(executor._io_pool if executor else None)
 
                 # Step 5: Chunk
                 dash.set_step("Chunk")
