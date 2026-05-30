@@ -19,10 +19,17 @@ __author__ = "Luca Ostinelli"
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+# The Hugging Face Xet transfer backend can stall on some networks (KVM guests,
+# restrictive egress) leaving 0-byte downloads. Prefer the classic, resumable
+# HTTP downloader unless the user explicitly opts back in.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
 from scripts.hardware import get_profile
 from scripts.utils import MODELS_DIR, NER_MODEL_NAME, WHISPER_DEFAULT_MODEL, ensure_dirs
@@ -95,7 +102,6 @@ def _hf_download(repo_id: str, filename: str, dest_dir: Path) -> Path:
         repo_id=repo_id,
         filename=filename,
         local_dir=str(dest_dir),
-        local_dir_use_symlinks=False,
     )
     path = Path(cached)
     if path.resolve() != dest.resolve() and path.is_file():
