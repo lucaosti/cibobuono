@@ -179,8 +179,8 @@ def run_pipeline(
         )
         skip_extract = True
 
-    # ── Dashboard setup ───────────────────────────────────────────────
-    dash = Dashboard()
+    # ── Dashboard (terminal UI optional; JSON snapshot always on) ───
+    dash = Dashboard(live=not no_dashboard)
     use_dash = not no_dashboard
 
     if use_dash:
@@ -188,12 +188,9 @@ def run_pipeline(
 
     def _log(msg: str) -> None:
         logger.info(msg)
-        if use_dash:
-            dash.log(msg)
+        dash.log(msg)
 
     def _refresh_stats() -> None:
-        if not use_dash:
-            return
         vc = _count_videos_by_status()
         dash.set_totals(
             total_in_db=vc["total"],
@@ -202,10 +199,19 @@ def run_pipeline(
             errored=vc["errored"],
             skipped=len(load_json(SKIPPED_VIDEOS_JSON)),
             channels=len(load_json(CHANNELS_JSON)),
+            locales_found=len(load_json(LOCALES_JSON)),
+            visits_created=len(load_json(VISITS_JSON)),
+            flagged=len(load_json(FLAGGED_SEGMENTS_JSON)),
         )
-        dash.state.locales_found = len(load_json(LOCALES_JSON))
-        dash.state.visits_created = len(load_json(VISITS_JSON))
-        dash.state.flagged = len(load_json(FLAGGED_SEGMENTS_JSON))
+
+    def _dash_finish(
+        outcome: str,
+        *,
+        visits: int = 0,
+        flagged: int = 0,
+    ) -> None:
+        dash.complete_video(outcome=outcome, visits=visits, flagged=flagged)
+        _refresh_stats()
 
     run_report: dict = {
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -214,16 +220,14 @@ def run_pipeline(
 
     try:
         _log("Pipeline started")
-        if use_dash:
-            dash.set_phase("Phase 1 — Catalog")
+        dash.set_phase("Phase 1 — Catalog")
 
         # ------------------------------------------------------------------
         # PHASE 1: Catalog
         # ------------------------------------------------------------------
 
         # Step 1: Fetch channels
-        if use_dash:
-            dash.set_step("Fetch channels")
+        dash.set_step("Fetch channels")
         _log("Step 1: Fetching channels from channels_input.txt...")
         from scripts.fetch_channels import fetch_channels
         new_channels = fetch_channels()
@@ -232,8 +236,7 @@ def run_pipeline(
 
         # Step 2: Catalog ALL videos as pending (no download yet)
         if not skip_fetch:
-            if use_dash:
-                dash.set_step("Catalog videos")
+            dash.set_step("Catalog videos")
             _log("Step 2: Cataloging channel videos...")
             from scripts.fetch_videos import catalog_channel_videos
             n = catalog_channel_videos()
@@ -246,9 +249,8 @@ def run_pipeline(
         # PHASE 2: Process pending videos (newest first)
         # ------------------------------------------------------------------
 
-        if use_dash:
-            dash.set_phase("Phase 2 — Processing")
-            _refresh_stats()
+        dash.set_phase("Phase 2 — Processing")
+        _refresh_stats()
 
         from scripts.fetch_videos import (
             download_audio,
@@ -295,16 +297,14 @@ def run_pipeline(
                     )
                 skip_extract = True
 
-        if use_dash:
-            dash.set_video_batch(len(to_process))
+        dash.set_video_batch(len(to_process))
 
         stopped_gracefully = False
 
         # ── Sliding window: pre-download audio for first batch ────────
         prefetch_n = min(PREFETCH_WINDOW, len(to_process))
         _log(f"Prefetch: downloading audio for first {prefetch_n} videos...")
-        if use_dash:
-            dash.set_step("Prefetch audio")
+        dash.set_step("Prefetch audio")
         for pv in to_process[:prefetch_n]:
             audio = download_audio(pv["video_id"], pv["url"])
             if not audio:
@@ -349,8 +349,7 @@ def run_pipeline(
                 channel_rubriche = channel_info.get("rubriche", [])
                 v_title = video.get("title", video_id)
 
-                if use_dash:
-                    dash.update_video(i, v_title)
+                dash.update_video(i, v_title, video_id=video_id)
 
                 _log(f"[{i}/{len(to_process)}] {v_title[:70]}")
 
@@ -363,8 +362,7 @@ def run_pipeline(
                         publish_date = today_str()
 
                 # Step 3: Download audio
-                if use_dash:
-                    dash.set_step("Download audio")
+                dash.set_step("Download audio")
                 _log("  Downloading audio...")
                 audio_path = download_audio(video_id, video["url"])
                 if not audio_path:
@@ -373,10 +371,8 @@ def run_pipeline(
                     _update_processed(video_id, channel_id, VideoStatus.ERRORED)
                     recap["outcome"] = "errored"
                     recap["step"] = "download_audio"
-                    if use_dash:
-                        dash.tick_stat("errored")
-                        dash.complete_video()
-                        _refresh_stats()
+                    dash.tick_stat("errored")
+                    _dash_finish("errored")
                     continue
 
                 # Step 3.5: Metadata + video intelligence (pre-Whisper filters)
@@ -387,8 +383,7 @@ def run_pipeline(
                 video_description: str | None = None
 
                 if not skip_extract:
-                    if use_dash:
-                        dash.set_step("Video intel")
+                    dash.set_step("Video intel")
                     from scripts.fetch_videos import (
                         fetch_video_description,
                         fetch_video_metadata,
@@ -426,16 +421,26 @@ def run_pipeline(
                     video_intel = analyze_description_timestamps(dts, video_intel)
                     video_intel = analyze_chapters(chapters, video_intel)
 
+                    dash.set_video_sources(
+                        description_chars=len(video_description or ""),
+                        chapters_count=len(chapters),
+                        description_timestamps_count=len(dts),
+                        venue_hints_count=len(video_intel.venue_hints),
+                        intel_city=video_intel.city or "",
+                        intel_type=video_intel.video_type or "",
+                        intel_series=video_intel.series_name or "",
+                        uses_ner=True,
+                        uses_llm=True,
+                    )
+
                     # Title-based skip before Whisper
                     if video_intel.video_type == "non_review" and video_intel.skip_reason:
                         _log(f"  ✗ Skipped (title analysis: non-review): {video_intel.skip_reason}")
                         update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
                         _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
                         recap["outcome"] = "skipped_non_review"
-                        if use_dash:
-                            dash.tick_stat("processed")
-                            dash.complete_video()
-                            _refresh_stats()
+                        dash.tick_stat("processed")
+                        _dash_finish("processed")
                         continue
 
                     _log(f"  Intel: type={video_intel.video_type}, city={video_intel.city}, "
@@ -448,15 +453,12 @@ def run_pipeline(
                         update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
                         _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
                         recap["outcome"] = "skipped_non_food"
-                        if use_dash:
-                            dash.tick_stat("processed")
-                            dash.complete_video()
-                            _refresh_stats()
+                        dash.tick_stat("processed")
+                        _dash_finish("processed")
                         continue
 
                 # Step 4: Transcribe
-                if use_dash:
-                    dash.set_step("Transcribe")
+                dash.set_step("Transcribe")
                 if not skip_transcribe:
                     _log("  Transcribing...")
                     from scripts.transcribe_video import transcribe_audio
@@ -467,10 +469,8 @@ def run_pipeline(
                         _update_processed(video_id, channel_id, VideoStatus.ERRORED)
                         recap["outcome"] = "errored"
                         recap["step"] = "transcribe"
-                        if use_dash:
-                            dash.tick_stat("errored")
-                            dash.complete_video()
-                            _refresh_stats()
+                        dash.tick_stat("errored")
+                        _dash_finish("errored")
                         continue
                 else:
                     _log("  Transcription skipped (cached)")
@@ -484,15 +484,17 @@ def run_pipeline(
                         _update_processed(video_id, channel_id, VideoStatus.ERRORED)
                         recap["outcome"] = "errored"
                         recap["step"] = "transcript_cache_missing"
-                        if use_dash:
-                            dash.tick_stat("errored")
-                            dash.complete_video()
-                            _refresh_stats()
+                        dash.tick_stat("errored")
+                        _dash_finish("errored")
                         continue
 
+                dash.set_video_sources(
+                    transcript_source=transcript.get("source", "whisper"),
+                    transcript_chars=len(transcript.get("text", "")),
+                )
+
                 # Step 5: Chunk
-                if use_dash:
-                    dash.set_step("Chunk")
+                dash.set_step("Chunk")
                 _log("  Chunking transcription...")
                 from scripts.chunk_transcription import chunk_transcription
                 chunks = chunk_transcription(transcript)
@@ -504,15 +506,12 @@ def run_pipeline(
                     _update_processed(video_id, channel_id, VideoStatus.ERRORED)
                     recap["outcome"] = "errored"
                     recap["step"] = "chunk"
-                    if use_dash:
-                        dash.tick_stat("errored")
-                        dash.complete_video()
-                        _refresh_stats()
+                    dash.tick_stat("errored")
+                    _dash_finish("errored")
                     continue
 
                 # Step 6: Extract locales with LLM
-                if use_dash:
-                    dash.set_step("Extract (LLM)")
+                dash.set_step("Extract (LLM)")
                 if not skip_extract:
                     _log("  Extracting locales with LLM...")
                     from scripts.extract_locales import is_food_review_video
@@ -528,12 +527,11 @@ def run_pipeline(
                         update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
                         _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
                         recap["outcome"] = "skipped_food_gate"
-                        if use_dash:
-                            dash.tick_stat("processed")
-                            dash.complete_video()
-                            _refresh_stats()
+                        dash.tick_stat("processed")
+                        _dash_finish("processed")
                         continue
                     _log(f"  Food-check: {food_reason}")
+                    dash.set_video_sources(food_gate=food_reason[:120])
 
                     extractions, flagged_extractions = extract_from_video(
                         video_id,
@@ -593,14 +591,14 @@ def run_pipeline(
                         e["chunk_end"] = _stt(end_ts)
                         _log(f"  Timestamp corrected for '{name}': {old_ts:.0f}s → {best_ts:.0f}s")
 
+                dash.set_extractions(extractions, flagged_extractions)
+
                 if not extractions and not flagged_extractions:
                     _log(f"  No locales found in {video_id}")
                     update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
                     _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
                     recap["outcome"] = "processed_empty"
-                    if use_dash:
-                        dash.complete_video()
-                        _refresh_stats()
+                    _dash_finish("processed_empty")
                     continue
 
                 # Build set of trusted venue names (high-confidence title/description hints)
@@ -618,8 +616,7 @@ def run_pipeline(
                     return False
 
                 # Step 7: Geocode
-                if use_dash:
-                    dash.set_step("Geocode")
+                dash.set_step("Geocode")
                 if extractions:
                     _log(f"  Geocoding {len(extractions)} locales...")
                     from scripts.geocode_locales import geocode_extractions
@@ -638,8 +635,7 @@ def run_pipeline(
                     _log(f"  Geocoded: {len(extractions)}, failed: {len(non_geocoded)}")
 
                 # Step 7b: Verify locales exist on OpenStreetMap
-                if use_dash:
-                    dash.set_step("Verify (OSM)")
+                dash.set_step("Verify (OSM)")
                 if extractions:
                     _log(f"  Verifying {len(extractions)} locales on OpenStreetMap...")
                     from scripts.verify_locales import verify_extractions
@@ -657,8 +653,7 @@ def run_pipeline(
                     _log(f"  Verified: {len(extractions)}, not found: {len(not_verified)}")
 
                 # Step 8: Deduplicate
-                if use_dash:
-                    dash.set_step("Deduplicate")
+                dash.set_step("Deduplicate")
                 if extractions:
                     _log("  Deduplicating locales...")
                     from scripts.deduplicate_locales import deduplicate_locales
@@ -667,8 +662,7 @@ def run_pipeline(
                     locale_mapping = []
 
                 # Step 9: Populate visits + flagged
-                if use_dash:
-                    dash.set_step("Populate")
+                dash.set_step("Populate")
                 _log("  Populating visits...")
                 from scripts.populate_json import populate_visits, populate_flagged
 
@@ -681,8 +675,7 @@ def run_pipeline(
                     populate_flagged(flagged_extractions, video_id, channel_id)
 
                 # Step 10: Update status
-                if use_dash:
-                    dash.set_step("Update status")
+                dash.set_step("Update status")
                 update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
                 _update_processed(
                     video_id, channel_id, VideoStatus.PROCESSED,
@@ -695,9 +688,7 @@ def run_pipeline(
                 recap["visits_created"] = len(new_visits)
                 recap["flagged_segments"] = len(flagged_extractions)
 
-                if use_dash:
-                    dash.complete_video()
-                    _refresh_stats()
+                _dash_finish("processed", visits=len(new_visits), flagged=len(flagged_extractions))
 
                 # Sliding window: prefetch next video outside current window
                 next_prefetch = i - 1 + PREFETCH_WINDOW  # i is 1-based
@@ -742,9 +733,8 @@ def run_pipeline(
         else:
             _log("Git push skipped (--skip-push)")
 
-        if use_dash:
-            dash.set_phase("Complete ✓")
-            _refresh_stats()
+        dash.set_phase("Complete ✓")
+        _refresh_stats()
 
         _log("Pipeline complete!")
 
