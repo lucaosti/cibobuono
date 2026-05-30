@@ -428,6 +428,34 @@ class Dashboard:
         except (json.JSONDecodeError, OSError):
             return None
 
+    def reset_to_idle(self) -> None:
+        """Clear ephemeral run state so the web dashboard does not show a stale run."""
+        s = self.state
+        s.phase = "Idle"
+        s.current_video_index = 0
+        s.total_videos = 0
+        s.current_video_id = ""
+        s.current_video_title = ""
+        s.current_step = ""
+        s.current_step_index = 0
+        s.current_extractions = []
+        s.run_locales = []
+        s.recent_completed = []
+        s.sources = VideoSourcesInfo()
+        s.video_start_time = 0.0
+        s.step_start_time = 0.0
+        live = compute_live_stats()
+        s.total_in_db = live["total_videos"]
+        s.pending = live["pending"]
+        s.processed = live["processed"]
+        s.skipped = live["skipped"]
+        s.errored = live["errored"]
+        s.channels = live["channels"]
+        s.locales_found = live["locales_in_db"]
+        s.visits_created = live["visits_in_db"]
+        s.flagged = live["flagged_in_db"]
+        self.persist_snapshot()
+
     def _touch(self) -> None:
         self.persist_snapshot()
         self._refresh()
@@ -613,6 +641,77 @@ class Dashboard:
         if h:
             return f"{h}h {m:02d}m {sec:02d}s"
         return f"{m}m {sec:02d}s"
+
+
+def compute_live_stats() -> dict[str, int]:
+    """Read current counts directly from data JSON files (always fresh)."""
+    from scripts.utils import (
+        CHANNELS_JSON,
+        FLAGGED_SEGMENTS_JSON,
+        SKIPPED_VIDEOS_JSON,
+        VIDEOS_JSON,
+    )
+
+    videos = load_json(VIDEOS_JSON)
+    counts = {"total": len(videos), "pending": 0, "processed": 0, "errored": 0}
+    for v in videos:
+        s = v.get("status", "pending")
+        if s in counts:
+            counts[s] += 1
+    return {
+        "channels": len(load_json(CHANNELS_JSON)),
+        "total_videos": counts["total"],
+        "pending": counts["pending"],
+        "processed": counts["processed"],
+        "skipped": len(load_json(SKIPPED_VIDEOS_JSON)),
+        "errored": counts["errored"],
+        "locales_in_db": len(load_json(LOCALES_JSON)),
+        "visits_in_db": len(load_json(VISITS_JSON)),
+        "flagged_in_db": len(load_json(FLAGGED_SEGMENTS_JSON)),
+    }
+
+
+def build_web_state(snapshot: dict | None, *, pipeline_running: bool) -> dict:
+    """Merge pipeline snapshot with live DB stats; hide stale run data when idle."""
+    live = compute_live_stats()
+    base: dict = dict(snapshot) if snapshot else {}
+
+    stats = dict(base.get("stats") or {})
+    stats.update(live)
+    stats["run_locales_count"] = (
+        len(base.get("run_locales") or []) if pipeline_running else 0
+    )
+    base["stats"] = stats
+
+    base["database_locales"] = _database_locales_with_confidence(limit=50)
+    base["pipeline_running"] = pipeline_running
+
+    if not pipeline_running:
+        base["phase"] = "Idle"
+        base["stale_snapshot"] = bool(snapshot)
+        base["run_locales"] = []
+        base["recent_videos"] = []
+        base["current_video"] = {
+            "index": 0,
+            "total": 0,
+            "video_id": "",
+            "title": "",
+            "step": "",
+            "step_index": 0,
+            "sources": asdict(VideoSourcesInfo()),
+            "extractions": [],
+        }
+        base["timing"] = {
+            "run_elapsed_s": None,
+            "current_video_elapsed_s": None,
+            "current_step_elapsed_s": None,
+            "avg_video_s": None,
+            "videos_completed_this_run": 0,
+        }
+    else:
+        base["stale_snapshot"] = False
+
+    return base
 
 
 def _database_locales_with_confidence(limit: int = 50) -> list[dict]:

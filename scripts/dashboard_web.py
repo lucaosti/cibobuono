@@ -1,8 +1,8 @@
 """
 dashboard_web.py — Browser dashboard for the CiboBuono pipeline.
 
-Live monitoring, manual review queue, GitHub-Issues reports, pipeline control.
-Data files are edited manually (outside the dashboard) by design.
+Live monitoring (always merged with fresh DB stats), hardware overlay,
+manual review queue, read-only GitHub Issues reports, JSON editing, pipeline control.
 """
 
 from __future__ import annotations
@@ -13,22 +13,29 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
-from scripts.dashboard import DASHBOARD_SNAPSHOT_PATH, Dashboard
+from scripts.dashboard import (
+    DASHBOARD_SNAPSHOT_PATH,
+    Dashboard,
+    build_web_state,
+)
 from scripts.github_issues import (
     GITHUB_REPO,
     issues_page_url,
     list_reports,
-    report_issue_url,
 )
 from scripts.pipeline_control import (
+    EDITABLE_FILES,
+    read_editable,
     request_pause,
     request_resume,
     request_stop,
     start_pipeline,
     sync_status,
+    write_editable,
 )
+from scripts.resource_monitor import dashboard_hardware
 from scripts.review_queue import (
     pending_reviews,
     resolve_review,
@@ -36,6 +43,10 @@ from scripts.review_queue import (
 )
 
 _STATIC_HTML = Path(__file__).parent / "static" / "dashboard.html"
+
+
+def _pipeline_running() -> bool:
+    return sync_status().get("status") in ("running", "paused", "stopping")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -48,7 +59,9 @@ class _Handler(BaseHTTPRequestHandler):
             html = _STATIC_HTML.read_text(encoding="utf-8")
             self._respond(200, "text/html; charset=utf-8", html.encode("utf-8"))
         elif path == "/api/state":
-            data = Dashboard.load_snapshot() or {}
+            running = _pipeline_running()
+            snap = Dashboard.load_snapshot()
+            data = build_web_state(snap, pipeline_running=running)
             data["control"] = sync_status()
             data["review_pending_count"] = len(pending_reviews(limit=500))
             data["reports_open_count"] = sum(
@@ -56,6 +69,8 @@ class _Handler(BaseHTTPRequestHandler):
             )
             data["recent_visits"] = visits_with_links(limit=25)
             self._json(data)
+        elif path == "/api/hardware":
+            self._json(dashboard_hardware())
         elif path == "/api/review":
             self._json({"items": pending_reviews(limit=80)})
         elif path == "/api/reports":
@@ -66,6 +81,21 @@ class _Handler(BaseHTTPRequestHandler):
                     "items": list_reports(limit=50),
                 }
             )
+        elif path == "/api/data":
+            self._json({"files": sorted(EDITABLE_FILES.keys())})
+        elif path.startswith("/api/data/"):
+            name = unquote(path.split("/api/data/", 1)[1])
+            try:
+                content, kind = read_editable(name)
+                if kind == "json":
+                    payload = json.dumps(content, ensure_ascii=False, indent=2)
+                else:
+                    payload = content
+                self._json({"name": name, "kind": kind, "content": payload})
+            except KeyError:
+                self._json({"error": "File non consentito"}, status=404)
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
         else:
             self.send_error(404)
 
@@ -111,18 +141,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, status=500)
             return
 
-        if path == "/api/reports":
-            # Backend-less: return a prefilled GitHub "new issue" URL. The user
-            # reviews and submits it on GitHub, so no token is ever needed.
+        if path.startswith("/api/data/"):
+            name = unquote(path.split("/api/data/", 1)[1])
             try:
-                url = report_issue_url(
-                    locale_name=str(body.get("locale_name", "")),
-                    reason=str(body.get("reason", "")),
-                    video_id=str(body.get("video_id", "")),
-                    youtube_url=str(body.get("youtube_url", "")),
-                )
-                self._json({"ok": True, "issue_url": url})
-            except Exception as e:
+                write_editable(name, body.get("content"))
+                self._json({"ok": True, "message": f"Salvato {name}"})
+            except KeyError:
+                self._json({"error": "File non consentito"}, status=404)
+            except (ValueError, TypeError) as e:
+                self._json({"error": str(e)}, status=400)
+            except OSError as e:
                 self._json({"error": str(e)}, status=500)
             return
 

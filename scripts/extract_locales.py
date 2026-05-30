@@ -197,8 +197,9 @@ def is_food_review_video(
 
     description_section = ""
     if video_description:
-        desc_trunc = video_description[:500]
-        description_section = f'DESCRIPTION: "{desc_trunc}"\n'
+        # Use the full description — venue names and addresses are often listed here.
+        safe_desc = video_description[:12000].replace('"', "'")
+        description_section = f"DESCRIPTION (full):\n\"{safe_desc}\"\n"
 
     user_msg = _FOOD_USER_TEMPLATE.format(
         title=title[:200].replace('"', "'"),

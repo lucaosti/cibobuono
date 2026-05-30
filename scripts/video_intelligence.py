@@ -179,24 +179,63 @@ def parse_description_timestamps(description: str) -> list[dict]:
 
 
 def analyze_description(description: str, intel: VideoIntel) -> VideoIntel:
-    """Enrich VideoIntel with venue hints from the description."""
+    """Enrich VideoIntel with venue hints from the full video description."""
     if not description:
         return intel
 
+    existing_names = {h["name"].lower() for h in intel.venue_hints}
+
+    def _add(name: str, confidence: str = "medium") -> None:
+        n = name.strip()
+        if len(n) < 3 or n.lower() in existing_names:
+            return
+        if n.lower() in ("roma", "milano", "torino", "napoli", "viterbo", "rieti",
+                         "frosinone", "una", "questo", "quello", "link", "social"):
+            return
+        intel.venue_hints.append({"name": n, "source": "description", "confidence": confidence})
+        existing_names.add(n.lower())
+        logger.info(f"Description → venue hint: '{n}'")
+
     # "scopriamo X a CITY" / "vi porto a X" / "andiamo a X"
     for pattern in [
-        r"(?:scopriamo|vi porto a|andiamo a|portiamo a|provare)\s+([A-ZÀ-Ú][a-zà-ú']+(?:\s+[A-ZÀ-Úa-zà-ú']+){0,3})\s+a\s+([A-ZÀ-Ú][a-zà-ú]+)",
-        r"(?:scopriamo|vi porto in|andiamo in)\s+([A-ZÀ-Ú][a-zà-ú']+(?:\s+[A-ZÀ-Úa-zà-ú']+){0,3})",
+        r"(?:scopriamo|vi porto a|andiamo a|portiamo a|provare|mangeremo da|mangiamo da)\s+"
+        r"([A-ZÀ-Ú][a-zà-ú']+(?:\s+[A-ZÀ-Úa-zà-ú']+){0,4})",
+        r"(?:scopriamo|vi porto in|andiamo in)\s+([A-ZÀ-Ú][a-zà-ú']+(?:\s+[A-ZÀ-Úa-zà-ú']+){0,4})",
     ]:
         for m in re.finditer(pattern, description, re.IGNORECASE):
-            name = m.group(1).strip()
-            if len(name) >= 3 and name.lower() not in ("roma", "milano", "torino", "napoli",
-                                                         "viterbo", "rieti", "frosinone",
-                                                         "una", "questo", "quello"):
-                existing_names = {h["name"].lower() for h in intel.venue_hints}
-                if name.lower() not in existing_names:
-                    intel.venue_hints.append({"name": name, "source": "description", "confidence": "medium"})
-                    logger.info(f"Description → venue hint: '{name}'")
+            _add(m.group(1).strip())
+
+    # Venue-type prefix anywhere in description: "Pizzeria Da Remo", "Forno Roscioli"
+    for m in re.finditer(
+        r"(?i)\b(pizzeria|trattoria|ristorante|osteria|forno|panificio|pasticceria|"
+        r"gelateria|friggitoria|rosticceria|enoteca|hosteria|locanda)\s+"
+        r"([A-ZÀ-Ú][\wà-ú'']+(?:\s+[A-ZÀ-Ú][\wà-ú'']+){0,2})",
+        description,
+    ):
+        _add(f"{m.group(1).capitalize()} {m.group(2).strip()}", "high")
+
+    # "Da X" / "Al X" as standalone venue references
+    for m in re.finditer(
+        r"(?i)\b(?:da|al|alla|allo|dal|dalla|presso)\s+"
+        r"([A-ZÀ-Ú][\wà-ú'']+(?:\s+[A-ZÀ-Ú][\wà-ú'']+){0,2})",
+        description,
+    ):
+        _add(m.group(1).strip())
+
+    # Lines that look like venue listings (bullet / numbered)
+    for line in description.splitlines():
+        line = line.strip()
+        m = re.match(
+            r"^(?:[-•*]|\d+[.)])\s*"
+            r"((?:[Pp]izzeria|[Tt]rattoria|[Rr]istorante|[Ff]orno|[Oo]steria)\s+.+)$",
+            line,
+        )
+        if m:
+            _add(m.group(1).strip()[:80], "high")
+        # Plain capitalized venue name on its own line (common in Italian descriptions)
+        m2 = re.match(r"^([A-ZÀ-Ú][\wà-ú'']+(?:\s+[A-ZÀ-Ú][\wà-ú'']+){0,2})$", line)
+        if m2 and 4 <= len(line) <= 60 and not re.search(r"http|www|@|#", line):
+            _add(m2.group(1).strip(), "medium")
 
     # Address patterns: "Via/Piazza/Corso ... N, CITY"
     for m in re.finditer(

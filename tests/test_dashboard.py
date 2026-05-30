@@ -89,6 +89,48 @@ def test_load_snapshot_missing_returns_none(tmp_path: Path, monkeypatch: pytest.
     assert Dashboard.load_snapshot() is None
 
 
+def test_build_web_state_hides_stale_run(dash: Dashboard, monkeypatch: pytest.MonkeyPatch):
+    from scripts.dashboard import build_web_state
+
+    monkeypatch.setattr(
+        "scripts.dashboard.compute_live_stats",
+        lambda: {
+            "channels": 1, "total_videos": 2, "pending": 1, "processed": 1,
+            "skipped": 0, "errored": 0, "locales_in_db": 1,
+            "visits_in_db": 0, "flagged_in_db": 0,
+        },
+    )
+    monkeypatch.setattr("scripts.dashboard._database_locales_with_confidence", lambda limit=50: [])
+
+    stale = {"phase": "Complete ✓", "stats": {"pending": 99}, "run_locales": [{"name": "old"}]}
+    idle = build_web_state(stale, pipeline_running=False)
+    assert idle["phase"] == "Idle"
+    assert idle["stats"]["pending"] == 1
+    assert idle["run_locales"] == []
+    assert idle["stale_snapshot"] is True
+
+    live = build_web_state(stale, pipeline_running=True)
+    assert live["phase"] == "Complete ✓"
+    assert len(live["run_locales"]) == 1
+
+
+def test_reset_to_idle_clears_run_state(dash: Dashboard):
+    dash.update_video(3, "Old video", video_id="old123")
+    dash.set_extractions([{"locale_name": "X", "city": "Roma", "confidence": 0.9}])
+    dash.reset_to_idle()
+    assert dash.state.phase == "Idle"
+    assert dash.state.run_locales == []
+    assert dash.state.current_video_id == ""
+
+
+def test_dashboard_hardware_returns_percentages():
+    from scripts.resource_monitor import dashboard_hardware
+
+    hw = dashboard_hardware()
+    assert "cpu_percent" in hw
+    assert "gpu_percent" in hw
+
+
 def test_locale_hit_dataclass_fields():
     hit = LocaleHit(name="Test", confidence=0.8, flagged=True, flag_reason="x")
     assert hit.name == "Test"

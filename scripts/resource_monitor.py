@@ -257,6 +257,26 @@ def snapshot(*, include_gpu: bool = False) -> ResourceSnapshot:
     )
 
 
+def dashboard_hardware() -> dict[str, float | None]:
+    """Lightweight CPU/GPU % for the web dashboard (polled every second)."""
+    cpu_pct: float | None = None
+    try:
+        import psutil  # type: ignore
+
+        cpu_pct = float(psutil.cpu_percent(interval=0))
+    except Exception:
+        snap = snapshot(include_gpu=False)
+        cpu_pct = min(100.0, snap.load_per_core / max(1, snap.cpu_count) * 100.0)
+
+    gpu_pct: float | None = None
+    _, _, gpu_pct = _gpu_memory_gb()
+
+    return {
+        "cpu_percent": round(cpu_pct, 1) if cpu_pct is not None else None,
+        "gpu_percent": round(gpu_pct, 1) if gpu_pct is not None else None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pressure detection + back-pressure
 # ---------------------------------------------------------------------------

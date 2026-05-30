@@ -183,6 +183,28 @@ textarea.editor {
 
 .empty { text-align: center; padding: 2rem; color: var(--muted); font-size: .9rem; }
 
+/* Hardware overlay — top right */
+.hw-overlay {
+  position: fixed; top: .75rem; right: 1rem; z-index: 100;
+  display: flex; gap: .65rem; align-items: center;
+  background: rgba(21,26,35,.92); border: 1px solid var(--border);
+  border-radius: 10px; padding: .45rem .85rem;
+  backdrop-filter: blur(8px); font-size: .78rem; font-weight: 600;
+}
+.hw-item { display: flex; align-items: center; gap: .35rem; color: var(--muted); }
+.hw-item span.val { color: var(--text); min-width: 2.5rem; text-align: right; }
+.hw-cpu .val { color: var(--cyan); }
+.hw-gpu .val { color: var(--green); }
+.hw-bar { width: 48px; height: 4px; background: var(--surface2); border-radius: 999px; overflow: hidden; }
+.hw-bar i { display: block; height: 100%; background: var(--cyan); transition: width .3s; }
+.hw-gpu .hw-bar i { background: var(--green); }
+
+.stale-banner {
+  background: rgba(251,191,36,.12); border: 1px solid var(--yellow);
+  color: var(--yellow); padding: .5rem 1rem; border-radius: 8px;
+  font-size: .82rem; margin-bottom: 1rem;
+}
+
 @media (max-width: 768px) {
   .sidebar { width: 100%; height: auto; position: relative; flex-direction: row; flex-wrap: wrap; }
   .main { margin-left: 0; padding: 1rem; }
@@ -192,6 +214,11 @@ textarea.editor {
 </style>
 </head>
 <body>
+
+<div class="hw-overlay" id="hw_overlay">
+  <div class="hw-item hw-cpu">CPU <div class="hw-bar"><i id="hw_cpu_bar" style="width:0%"></i></div> <span class="val" id="hw_cpu">—</span></div>
+  <div class="hw-item hw-gpu">GPU <div class="hw-bar"><i id="hw_gpu_bar" style="width:0%"></i></div> <span class="val" id="hw_gpu">—</span></div>
+</div>
 
 <aside class="sidebar">
   <div class="brand">
@@ -203,6 +230,7 @@ textarea.editor {
     <button data-page="review">🔍 Revisione <span class="badge" id="badge-review" hidden>0</span></button>
     <button data-page="reports">🚩 Segnalazioni <span class="badge" id="badge-reports" hidden>0</span></button>
     <button data-page="control">⚙️ Controllo</button>
+    <button data-page="data">📝 Dati JSON</button>
   </nav>
   <div class="sidebar-footer">Pipeline food vlog · IT</div>
 </aside>
@@ -213,8 +241,9 @@ textarea.editor {
 <section id="page-monitor" class="page active">
   <div class="page-header">
     <h2>Monitor pipeline</h2>
-    <p>Stato live · <span id="phase_label">—</span></p>
+    <p>Stato live · <span id="phase_label">—</span> · <span id="run_status">—</span></p>
   </div>
+  <div class="stale-banner" id="stale_banner" hidden>⚠ Dati di una run precedente nascosti — la pipeline non è in esecuzione. Le statistiche DB sono aggiornate live.</div>
   <div class="grid">
     <div class="card">
       <h3>Video in coda</h3>
@@ -291,31 +320,17 @@ textarea.editor {
   </div>
 </section>
 
-<!-- REPORTS -->
+<!-- REPORTS (read-only) -->
 <section id="page-reports" class="page">
   <div class="page-header">
-    <h2>Segnalazioni locale sbagliato</h2>
-    <p>Senza backend: le segnalazioni diventano <strong>GitHub Issues</strong>, così resta traccia pubblica sia delle mie che di quelle altrui. Vedi tutte su <a id="reports_repo_link" href="#" target="_blank" rel="noopener">GitHub</a>.</p>
+    <h2>Segnalazioni GitHub Issues</h2>
+    <p>Solo lettura: le segnalazioni si creano su GitHub. Qui le leggi per agire (correggere JSON, chiudere issue). <a id="reports_repo_link" href="#" target="_blank" rel="noopener">Apri su GitHub →</a></p>
   </div>
-  <div class="grid">
-    <div class="card">
-      <h3>Nuova segnalazione</h3>
-      <div class="form-grid">
-        <div class="full"><label>Nome locale</label><input type="text" id="rep_name" placeholder="Es. Pizzeria XYZ"/></div>
-        <div><label>Video ID (opz.)</label><input type="text" id="rep_video" placeholder="abc123"/></div>
-        <div class="full"><label>Link YouTube (opz.)</label><input type="text" id="rep_url" placeholder="https://youtu.be/...?t=120"/></div>
-        <div class="full"><label>Motivo</label><textarea id="rep_reason" rows="3" placeholder="Perché è sbagliato…"></textarea></div>
-      </div>
-      <div class="btn-row"><button class="primary" id="btn_submit_report">Apri issue su GitHub</button></div>
-      <p style="color:var(--muted);font-size:.78rem;margin-top:.4rem">Si aprirà GitHub con i campi precompilati: basta confermare per pubblicare. Non serve alcun token.</p>
-      <p class="msg" id="report_feedback"></p>
-    </div>
-    <div class="card grid-wide">
-      <h3>Segnalazioni (GitHub Issues)</h3>
-      <div style="overflow-x:auto">
-        <table><thead><tr><th>#</th><th>Titolo</th><th>Stato</th><th>Autore</th><th>Data</th></tr></thead>
-        <tbody id="reports_table"></tbody></table>
-      </div>
+  <div class="card grid-wide">
+    <h3>Issue aperte e chiuse (label <code>locale-report</code>)</h3>
+    <div style="overflow-x:auto">
+      <table><thead><tr><th>#</th><th>Titolo</th><th>Stato</th><th>Autore</th><th>Data</th><th></th></tr></thead>
+      <tbody id="reports_table"></tbody></table>
     </div>
   </div>
 </section>
@@ -344,6 +359,23 @@ textarea.editor {
   </div>
 </section>
 
+<!-- DATA -->
+<section id="page-data" class="page">
+  <div class="page-header">
+    <h2>Editor dati</h2>
+    <p>Modifica i file JSON del progetto. Salva con attenzione — le modifiche sono immediate.</p>
+  </div>
+  <div class="card grid-wide">
+    <div class="btn-row">
+      <select id="data_file"></select>
+      <button id="btn_load_data">Carica</button>
+      <button class="primary" id="btn_save_data">Salva</button>
+    </div>
+    <textarea class="editor" id="data_editor" spellcheck="false"></textarea>
+    <p class="msg" id="data_feedback"></p>
+  </div>
+</section>
+
 </main>
 
 <script>
@@ -357,8 +389,8 @@ function fmt(s) {
 }
 function confClass(c) {
   if (c == null) return '';
-  if (c >= 0.65) return 'conf-high';
-  if (c >= 0.5) return 'conf-mid';
+  if (c >= 0.72) return 'conf-high';
+  if (c >= 0.55) return 'conf-mid';
   return 'conf-low';
 }
 function confPct(c) { return c == null ? '—' : Math.round(c*100)+'%'; }
@@ -390,6 +422,7 @@ document.querySelectorAll('.nav button').forEach(btn => {
     $('page-' + btn.dataset.page).classList.add('active');
     if (btn.dataset.page === 'review') loadReview();
     if (btn.dataset.page === 'reports') loadReports();
+    if (btn.dataset.page === 'data' && !$('data_file').options.length) loadDataFiles();
   };
 });
 
@@ -403,6 +436,10 @@ function renderMonitor(d) {
   $('locales_db').textContent = st.locales_in_db ?? '—';
   $('locales_run').textContent = st.run_locales_count ?? '—';
   $('visits').textContent = st.visits_in_db ?? '—';
+
+  const running = d.pipeline_running;
+  $('run_status').textContent = running ? '🟢 in esecuzione' : '⚪ idle';
+  $('stale_banner').hidden = !d.stale_snapshot;
 
   const cv = d.current_video || {};
   const pct = cv.total ? Math.round((cv.index || 0) / cv.total * 100) : 0;
@@ -565,6 +602,17 @@ async function loadReview() {
   } catch(e) { setMsg('review_feedback', e.message, false); }
 }
 
+async function pollHardware() {
+  try {
+    const h = await api('/api/hardware');
+    const cpu = h.cpu_percent, gpu = h.gpu_percent;
+    $('hw_cpu').textContent = cpu != null ? Math.round(cpu) + '%' : '—';
+    $('hw_gpu').textContent = gpu != null ? Math.round(gpu) + '%' : '—';
+    if (cpu != null) $('hw_cpu_bar').style.width = Math.min(100, cpu) + '%';
+    if (gpu != null) $('hw_gpu_bar').style.width = Math.min(100, gpu) + '%';
+  } catch(e) {}
+}
+
 async function loadReports() {
   try {
     const r = await api('/api/reports');
@@ -578,36 +626,50 @@ async function loadReports() {
         <td><a href="${it.url}" target="_blank" rel="noopener">${it.title||'(senza titolo)'}</a></td>
         <td><span class="${cls}">${it.state}</span></td>
         <td>${it.user||'—'}</td>
-        <td>${(it.created_at||'').slice(0,10)||'—'}</td>`;
+        <td>${(it.created_at||'').slice(0,10)||'—'}</td>
+        <td><a href="${it.url}" target="_blank" rel="noopener" class="btn-yt">Apri</a></td>`;
       tb.appendChild(tr);
     });
-    if (!(r.items||[]).length) tb.innerHTML = '<tr><td colspan="5" class="empty">Nessuna segnalazione su GitHub</td></tr>';
+    if (!(r.items||[]).length) tb.innerHTML = '<tr><td colspan="6" class="empty">Nessuna issue su GitHub — crea segnalazioni direttamente su GitHub con label <code>locale-report</code></td></tr>';
   } catch(e) {
-    $('reports_table').innerHTML = '<tr><td colspan="5" class="empty">Impossibile leggere le issue (offline?)</td></tr>';
+    $('reports_table').innerHTML = '<tr><td colspan="6" class="empty">Impossibile leggere le issue GitHub</td></tr>';
   }
 }
 
-$('btn_submit_report').onclick = async () => {
-  const name = $('rep_name').value.trim();
-  const reason = $('rep_reason').value.trim();
-  if (!name || !reason) return setMsg('report_feedback','Nome e motivo obbligatori',false);
+async function loadDataFiles() {
+  const r = await api('/api/data');
+  const sel = $('data_file');
+  sel.innerHTML = '';
+  (r.files||[]).forEach(f => {
+    const o = document.createElement('option'); o.value = f; o.textContent = f; sel.appendChild(o);
+  });
+}
+$('btn_load_data').onclick = async () => {
+  const name = $('data_file').value;
   try {
-    const r = await api('/api/reports', {
+    const r = await api('/api/data/' + encodeURIComponent(name));
+    $('data_editor').value = r.content;
+    setMsg('data_feedback','Caricato '+name, true);
+  } catch(e) { setMsg('data_feedback', e.message, false); }
+};
+$('btn_save_data').onclick = async () => {
+  const name = $('data_file').value;
+  let content = $('data_editor').value;
+  try {
+    if (!name.endsWith('.txt')) content = JSON.parse(content);
+    await api('/api/data/' + encodeURIComponent(name), {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        locale_name: name,
-        reason,
-        video_id: $('rep_video').value.trim(),
-        youtube_url: $('rep_url').value.trim(),
-      }),
+      body: JSON.stringify({ content }),
     });
-    if (r.issue_url) window.open(r.issue_url, '_blank', 'noopener');
-    setMsg('report_feedback','GitHub aperto: conferma per pubblicare la issue.',true);
-    $('rep_name').value = ''; $('rep_reason').value = '';
-  } catch(e) { setMsg('report_feedback', e.message, false); }
+    setMsg('data_feedback','Salvato', true);
+    poll();
+  } catch(e) { setMsg('data_feedback', e.message, false); }
 };
 
+loadDataFiles();
+setInterval(pollHardware, 1000);
 setInterval(poll, 2000);
+pollHardware();
 poll();
 </script>
 </body>

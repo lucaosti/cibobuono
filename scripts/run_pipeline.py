@@ -777,6 +777,7 @@ def run_pipeline(
             pc.mark_finished()
         except Exception:
             pass
+        dash.reset_to_idle()
         if use_dash:
             dash.stop()
 

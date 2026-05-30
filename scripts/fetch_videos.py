@@ -283,47 +283,47 @@ def fetch_video_metadata(video_id: str) -> dict:
 
 def fetch_video_description(video_id: str) -> str:
     """
-    Fetch the video description from YouTube via yt-dlp.
-    Returns description text, or empty string on failure.
-    Caches result to avoid repeated API calls.
+    Fetch the full video description from YouTube via yt-dlp.
+
+    Returns the longest description found across cache files; re-fetches via
+    dump-json when cached copies look truncated (common cause of missing venues).
     """
     meta_path = CACHE_DIR / f"{video_id}_metadata.json"
+    desc_path = CACHE_DIR / f"{video_id}_description.txt"
+
+    candidates: list[str] = []
+
+    if desc_path.exists():
+        try:
+            candidates.append(desc_path.read_text(encoding="utf-8").strip())
+        except OSError:
+            pass
+
     if meta_path.exists():
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
-            desc = (data.get("description") or "").strip()
-            if desc:
-                return desc
+            candidates.append((data.get("description") or "").strip())
         except json.JSONDecodeError:
             pass
 
-    desc_path = CACHE_DIR / f"{video_id}_description.txt"
-    if desc_path.exists():
-        return desc_path.read_text(encoding="utf-8").strip()
+    best = max(candidates, key=len, default="")
+    # Descriptions under ~80 chars are almost always truncated cache artifacts.
+    if len(best) >= 80:
+        return best
 
-    try:
-        result = subprocess.run(
-            [
-                *yt_dlp_command(),
-                "--print", "description",
-                "--no-download",
-                "--no-playlist",
-                *YOUTUBE_EXTRACTOR_ARGS,
-                f"https://youtu.be/{video_id}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            desc = result.stdout.strip()
-            desc_path.write_text(desc, encoding="utf-8")
-            logger.info(f"Fetched description for {video_id} ({len(desc)} chars)")
-            return desc
-    except (subprocess.TimeoutExpired, Exception) as e:
-        logger.warning(f"Could not fetch description for {video_id}: {e}")
+    # Force fresh metadata download when cache looks truncated.
+    if meta_path.exists():
+        try:
+            meta_path.unlink()
+        except OSError:
+            pass
+    meta = fetch_video_metadata(video_id)
+    desc = (meta.get("description") or "").strip()
+    if desc:
+        desc_path.write_text(desc, encoding="utf-8")
+        return desc
 
-    return ""
+    return best
 
 
 def fetch_video_comments(video_id: str, max_comments: int = 40) -> list[dict]:
