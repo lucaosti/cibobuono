@@ -41,6 +41,7 @@ import json
 import os
 import signal
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from thefuzz import fuzz
@@ -77,6 +78,29 @@ logger = setup_logging("pipeline")
 
 # First SIGINT/SIGTERM: finish current video, then stop. Second: KeyboardInterrupt.
 _pipeline_shutdown = {"graceful": False}
+
+_prefetch_executor: ThreadPoolExecutor | None = None
+
+
+def _prefetch_pool() -> ThreadPoolExecutor:
+    global _prefetch_executor
+    if _prefetch_executor is None:
+        _prefetch_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="prefetch"
+        )
+    return _prefetch_executor
+
+
+def _schedule_audio_prefetch(
+    videos: list[dict], start_index: int, *, count: int = 3
+) -> None:
+    """Download audio for upcoming videos while GPU works on the current one."""
+    from scripts.fetch_videos import download_audio
+
+    pool = _prefetch_pool()
+    for j in range(start_index, min(start_index + count, len(videos))):
+        v = videos[j]
+        pool.submit(download_audio, v["video_id"], v["url"])
 _sig_previous: dict[int, object] = {}
 
 
@@ -190,6 +214,13 @@ def run_pipeline(
     def _log(msg: str) -> None:
         logger.info(msg)
         dash.log(msg)
+
+    # Pre-load Whisper once so the first video does not wait on model load.
+    if not skip_transcribe:
+        from scripts.transcribe_video import _get_whisper_model
+
+        _log("Pre-loading Whisper model…")
+        _get_whisper_model(whisper_model)
 
     def _refresh_stats() -> None:
         vc = _count_videos_by_status()
@@ -355,7 +386,11 @@ def run_pipeline(
                 "video_id": video["video_id"],
                 "title": (video.get("title") or "")[:200],
             }
+            food_confirmed_by_rules = False
             try:
+                # Prefetch upcoming audio while this video is processed (I/O overlap).
+                _schedule_audio_prefetch(to_process, i - 1, count=3)
+
                 # Sliding window: trim cache to window size
                 deleted = cleanup_cache(PREFETCH_WINDOW)
                 if deleted:
@@ -483,6 +518,18 @@ def run_pipeline(
                         _dash_finish("processed")
                         continue
 
+                    if not skip_extract:
+                        from scripts.extract_locales import check_food_video
+
+                        is_food_pre, food_pre_reason = check_food_video(
+                            v_title,
+                            video_description=video_description or "",
+                            video_intel=video_intel,
+                        )
+                        if food_pre_reason.startswith("Rules:"):
+                            food_confirmed_by_rules = True
+                            _log(f"  Food-check (pre-transcript): {food_pre_reason}")
+
                 # Step 4: Transcribe
                 dash.set_step("Transcribe")
                 if not skip_transcribe:
@@ -519,6 +566,12 @@ def run_pipeline(
                     transcript_chars=len(transcript.get("text", "")),
                 )
 
+                # Free Whisper VRAM before LLM-heavy extraction (same GPU).
+                if not skip_transcribe:
+                    from scripts.transcribe_video import release_whisper_model
+
+                    release_whisper_model()
+
                 # Step 5: Chunk
                 dash.set_step("Chunk")
                 _log("  Chunking transcription...")
@@ -540,23 +593,35 @@ def run_pipeline(
                 dash.set_step("Extract (LLM)")
                 if not skip_extract:
                     _log("  Extracting locales with LLM...")
-                    from scripts.extract_locales import is_food_review_video
+                    from scripts.extract_locales import check_food_video
                     from scripts.extract_pipeline import extract_from_video
 
-                    # LLM food-relevance gate (uses transcript; cheap checks ran in step 3.5)
                     transcript_text = transcript.get("text", "")
-                    is_food, food_reason = is_food_review_video(
-                        v_title, transcript_text, video_description
-                    )
-                    if not is_food:
-                        _log(f"  ✗ Skipped (LLM food-check): {food_reason}")
-                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
-                        recap["outcome"] = "skipped_food_gate"
-                        dash.tick_stat("processed")
-                        _dash_finish("processed")
-                        continue
-                    _log(f"  Food-check: {food_reason}")
+
+                    if food_confirmed_by_rules:
+                        food_reason = "Rules: confirmed pre-transcript"
+                        _log(f"  Food-check: {food_reason}")
+                    else:
+                        is_food, food_reason = check_food_video(
+                            v_title,
+                            transcript_text,
+                            video_description or "",
+                            video_intel=video_intel,
+                        )
+                        if not is_food:
+                            _log(f"  ✗ Skipped (LLM food-check): {food_reason}")
+                            update_video_status(
+                                video_id, VideoStatus.PROCESSED, publish_date
+                            )
+                            _update_processed(
+                                video_id, channel_id, VideoStatus.PROCESSED, 0, 0
+                            )
+                            recap["outcome"] = "skipped_food_gate"
+                            dash.tick_stat("processed")
+                            _dash_finish("processed")
+                            continue
+                        _log(f"  Food-check: {food_reason}")
+
                     dash.set_video_sources(food_gate=food_reason[:120])
 
                     extractions, flagged_extractions = extract_from_video(

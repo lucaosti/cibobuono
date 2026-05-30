@@ -152,6 +152,83 @@ def analyze_title(title: str) -> VideoIntel:
     return intel
 
 
+# ── Food-video signals (rules before LLM) ────────────────────────────────
+
+_FOOD_TITLE_SIGNALS = [
+    re.compile(r"\bcriminale\b", re.IGNORECASE),
+    re.compile(r"forni\s+criminali", re.IGNORECASE),
+    re.compile(r"hit\s+di\s+franchino", re.IGNORECASE),
+    re.compile(r"cosa\s+mangia", re.IGNORECASE),
+    re.compile(r"\bmangiamo\b|\bassaggiamo\b|\bassaggio\b|\bdegust", re.IGNORECASE),
+    re.compile(r"street\s*food|food\s*tour", re.IGNORECASE),
+    re.compile(
+        r"\b(?:pizzeria|trattoria|ristorante|osteria|forno|panificio|gelateria|"
+        r"rosticceria|friggitoria)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"miglior(?:e|i)?\s+(?:pizza|pasta|gelato|carbonara|suppl)", re.IGNORECASE),
+    re.compile(r"\bproviamo\b|\bandiamo\s+(?:da|in|a)\b", re.IGNORECASE),
+    re.compile(r"giro\s+(?:di|dei|del|delle)\b", re.IGNORECASE),
+]
+
+# Broader fallback for LLM false negatives (title-only, checked after LLM says NO).
+_FOOD_TITLE_LOOSE = re.compile(
+    r"mang|assagg|degust|food|street.?food|pizz|past[aà]|ristor|trattor|osteri|"
+    r"forn|gelat|rostic|frittor|criminale|mercato\s+dei|gastro",
+    re.IGNORECASE,
+)
+
+
+def title_suggests_food(title: str) -> bool:
+    """Loose title-only food signal for overriding LLM false negatives."""
+    if not title:
+        return False
+    if any(pat.search(title) for pat in _FOOD_TITLE_SIGNALS):
+        return True
+    return bool(_FOOD_TITLE_LOOSE.search(title))
+
+
+def food_video_confidence(
+    title: str,
+    intel: VideoIntel | None = None,
+    description: str = "",
+) -> tuple[bool | None, str]:
+    """Rule-based food signal. True=food, False=not food, None=uncertain.
+
+    Used to skip LLM food-check and to override LLM false negatives when the
+    title/description clearly indicate a food-venue video.
+    """
+    intel = intel or VideoIntel()
+    title = (title or "").strip()
+
+    if intel.video_type in ("single_venue", "multi_venue_tour"):
+        return True, f"title intel: {intel.video_type}"
+
+    if intel.series_name:
+        return True, f"known food series: {intel.series_name}"
+
+    if intel.venue_hints:
+        return True, f"venue hints from metadata ({len(intel.venue_hints)})"
+
+    for pat in _FOOD_TITLE_SIGNALS:
+        if pat.search(title):
+            return True, f"food title pattern ({pat.pattern[:48]})"
+
+    if description and parse_description_timestamps(description):
+        return True, "description lists venue timestamps"
+
+    if description and len(description) >= 120:
+        desc_lower = description.lower()
+        food_desc_markers = (
+            "pizzeria", "trattoria", "ristorante", "osteria", "forno",
+            "via ", "piazza ", "corso ", "indirizzo", "google maps",
+        )
+        if sum(1 for m in food_desc_markers if m in desc_lower) >= 2:
+            return True, "description has multiple venue/address markers"
+
+    return None, ""
+
+
 _DESC_TS_LINE = re.compile(
     r"^(\d{1,2}:\d{2}(?::\d{2})?)\s+(.+)$",
 )

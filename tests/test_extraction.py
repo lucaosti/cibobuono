@@ -12,6 +12,7 @@ from scripts.fetch_videos import detect_non_food_video, detect_recipe_video
 from scripts.extract_locales import (
     _is_valid_locale_name,
     _clean_locale_name,
+    check_food_video,
     extract_hints_from_description,
     is_food_review_video,
     rating_numeric_core,
@@ -156,6 +157,46 @@ class TestIsFoodReviewVideo:
         return mock_llm
 
     @patch("scripts.extract_locales.get_llm")
+    def test_food_llm_no_overridden_by_title_intel(self, mock_get_llm):
+        mock_get_llm.return_value = self._mock_llm_response("NO")
+        from scripts.video_intelligence import VideoIntel
+
+        intel = VideoIntel(video_type="multi_venue_tour", city="Roma")
+        is_food, reason = check_food_video(
+            "Roma criminale",
+            "parliamo di boxe e allenamento",
+            video_intel=intel,
+        )
+        assert is_food is True
+        assert reason.startswith("Rules:")
+
+    @patch("scripts.extract_locales.get_llm")
+    def test_food_llm_no_overridden_by_loose_title(self, mock_get_llm):
+        mock_get_llm.return_value = self._mock_llm_response("NO")
+        from scripts.video_intelligence import VideoIntel
+
+        is_food, reason = check_food_video(
+            "Girls trip gastro a Roma",
+            "parliamo di boxe",
+            video_intel=VideoIntel(),
+        )
+        assert is_food is True
+        assert "Override" in reason
+
+    @patch("scripts.extract_locales.get_llm")
+    def test_food_rules_skip_llm_for_criminale_title(self, mock_get_llm):
+        from scripts.video_intelligence import VideoIntel
+
+        is_food, reason = check_food_video(
+            "Napoli criminale",
+            "",
+            video_intel=VideoIntel(),
+        )
+        assert is_food is True
+        assert reason.startswith("Rules:")
+        mock_get_llm.assert_not_called()
+
+    @patch("scripts.extract_locales.get_llm")
     def test_food_video_passes(self, mock_get_llm):
         mock_get_llm.return_value = self._mock_llm_response("SI")
         is_food, reason = is_food_review_video(
@@ -163,7 +204,7 @@ class TestIsFoodReviewVideo:
             "andiamo a provare questa pizzeria fantastica che si chiama Bonci"
         )
         assert is_food is True
-        assert "food video" in reason
+        assert "food video" in reason or reason.startswith("Rules:")
 
     @patch("scripts.extract_locales.get_llm")
     def test_non_food_video_blocked(self, mock_get_llm):
@@ -217,9 +258,10 @@ class TestIsFoodReviewVideo:
         assert is_food is True
 
     def test_empty_transcript_defaults_to_true(self):
-        """No transcript → skip check, default to True."""
+        """No transcript → proceed (pre-transcript gate)."""
         is_food, reason = is_food_review_video("Un video", "")
         assert is_food is True
+        assert "pre-transcript" in reason or "Rules" in reason
 
     @patch("scripts.extract_locales.get_llm")
     def test_llm_exception_defaults_to_true(self, mock_get_llm):

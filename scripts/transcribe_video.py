@@ -271,7 +271,8 @@ def _get_whisper_model(model_name: str = WHISPER_DEFAULT_MODEL):
     # requested model genuinely won't fit.
     from scripts import resource_monitor as rm
 
-    rm.wait_until_calm(include_gpu=profile.whisper_device == "cuda")
+    if _whisper_model is None:
+        rm.wait_until_calm(include_gpu=profile.whisper_device == "cuda")
     fitted, note = rm.fit_whisper_model(profile, model_name)
     if fitted != model_name:
         logger.warning("Whisper model selection: %s", note)
@@ -325,6 +326,26 @@ def _get_whisper_model(model_name: str = WHISPER_DEFAULT_MODEL):
     _whisper_backend = _BACKEND_OPENAI
     _whisper_device = device
     return _whisper_model, _whisper_backend
+
+
+def release_whisper_model() -> None:
+    """Unload Whisper from GPU/RAM so the LLM can use VRAM without contention."""
+    global _whisper_model, _whisper_model_name, _whisper_backend, _whisper_device
+    if _whisper_model is None:
+        return
+    _whisper_model = None
+    _whisper_model_name = None
+    _whisper_backend = None
+    _whisper_device = None
+    try:
+        import gc
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    logger.info("Whisper model released — VRAM freed for LLM extraction")
 
 
 def find_audio_file(video_id: str) -> Path | None:

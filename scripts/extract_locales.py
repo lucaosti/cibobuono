@@ -156,55 +156,59 @@ def get_llm():
 # ---------------------------------------------------------------------------
 
 _FOOD_SYSTEM = (
-    "You classify Italian YouTube videos. "
+    "You classify Italian YouTube food-vlog videos. "
+    "These channels visit restaurants, pizzerias, bakeries, and street-food stalls. "
     "Answer SI or NO — is the video about physically visiting food venues?"
 )
 
 _FOOD_USER_TEMPLATE = (
     'VIDEO TITLE: "{title}"\n'
     "{description_section}"
-    'TRANSCRIPT EXCERPT (first minutes):\n"{transcript_sample}"\n\n'
-    "RULES:\n"
-    "- SI = the blogger clearly goes to named food businesses (restaurant, bakery, "
-    "street stall, etc.) and eats/tastes there in the video.\n"
-    "- NO = sports, boxing, gaming, interviews, activism, recipe-only at home, "
-    "generic vlogs without venue visits, or only talking about food without being on location.\n"
-    '- "Cena a 4 mani" or similar = private dinner event, NOT a venue review → NO\n'
-    '- "Salviamo il X" = activism video → NO\n'
-    '- Titles with "criminale" (e.g., "CITY criminale", "Forni criminali CITY") = food review → SI\n'
-    '- Titles with "Hit di Franchino:" = single venue food review → SI\n'
-    "- Borderline food/travel vlog with on-location eating → SI\n\n"
+    "{transcript_section}"
+    "RULES (IMPORTANT — title outweighs ambiguous transcript excerpts):\n"
+    "- SI = the blogger goes to named food businesses and eats/tastes on location.\n"
+    "- SI if the title indicates a food tour/review (criminale, Forni criminali, "
+    "Hit di Franchino, Cosa mangia, pizzeria/ristorante names, assaggio, giro del…).\n"
+    "- SI if the description lists venues, addresses, or timestamped venue names.\n"
+    "- NO = sports/boxing/gaming, activism (Salviamo…), private dinner events "
+    "(Cena a N mani), recipe-only at home, no on-location eating.\n"
+    "- When title/description clearly indicate food venues, answer SI even if the "
+    "transcript excerpt sounds generic.\n\n"
     "Answer with EXACTLY one word: SI or NO"
 )
 
 
-def is_food_review_video(
+def _food_llm_check(
     title: str,
     transcript_text: str,
-    video_description: str = "",
+    video_description: str,
 ) -> tuple[bool, str]:
-    """Use the LLM to classify whether a video is about visiting food locales."""
+    """LLM food gate (called only when rules are inconclusive)."""
     llm = get_llm()
     if llm is None:
         return True, "LLM not available, skipping check"
 
-    sample = transcript_text[:2000].strip()
-    mid = len(transcript_text) // 2
-    if len(transcript_text) > 2500:
-        sample = (transcript_text[:1000] + " … " + transcript_text[mid : mid + 1000]).strip()
-    if not sample:
-        return True, "Empty transcript, skipping check"
+    transcript_section = ""
+    if transcript_text.strip():
+        sample = transcript_text[:2000].strip()
+        mid = len(transcript_text) // 2
+        if len(transcript_text) > 2500:
+            sample = (
+                transcript_text[:1000] + " … " + transcript_text[mid : mid + 1000]
+            ).strip()
+        transcript_section = (
+            f'TRANSCRIPT EXCERPT:\n"{sample.replace(chr(34), chr(39))}"\n\n'
+        )
 
     description_section = ""
     if video_description:
-        # Use the full description — venue names and addresses are often listed here.
         safe_desc = video_description[:12000].replace('"', "'")
-        description_section = f"DESCRIPTION (full):\n\"{safe_desc}\"\n"
+        description_section = f"DESCRIPTION (full):\n\"{safe_desc}\"\n\n"
 
     user_msg = _FOOD_USER_TEMPLATE.format(
         title=title[:200].replace('"', "'"),
-        transcript_sample=sample.replace('"', "'"),
         description_section=description_section,
+        transcript_section=transcript_section,
     )
 
     try:
@@ -228,6 +232,64 @@ def is_food_review_video(
     except Exception as e:
         logger.warning(f"Food-relevance check failed: {e}, defaulting to True")
         return True, f"Error in food-check: {e}"
+
+
+def check_food_video(
+    title: str,
+    transcript_text: str = "",
+    video_description: str = "",
+    video_intel=None,
+) -> tuple[bool, str]:
+    """Decide if a video is a food-venue visit video.
+
+    Order: rule-based signals (title/intel/description) → LLM → override LLM
+    false negatives when rules strongly indicate food.
+    """
+    from scripts.video_intelligence import (
+        VideoIntel,
+        food_video_confidence,
+        title_suggests_food,
+    )
+
+    intel = video_intel if isinstance(video_intel, VideoIntel) else None
+    rules_yes, rules_reason = food_video_confidence(
+        title, intel, video_description or ""
+    )
+    if rules_yes is True:
+        return True, f"Rules: {rules_reason}"
+
+    if not transcript_text.strip() and rules_yes is None:
+        return True, "Rules inconclusive pre-transcript — proceeding to transcribe"
+
+    is_food, llm_reason = _food_llm_check(title, transcript_text, video_description)
+    if is_food:
+        return True, llm_reason
+
+    # LLM false negative guard: trust title/intel/description over a misleading excerpt.
+    if intel and intel.video_type in ("single_venue", "multi_venue_tour"):
+        return True, f"Override LLM NO → SI (intel: {intel.video_type})"
+    if title_suggests_food(title):
+        return True, "Override LLM NO → SI (food title keywords)"
+    ovr, oreason = food_video_confidence(title, intel, video_description or "")
+    if ovr is True:
+        return True, f"Override LLM NO → SI ({oreason})"
+
+    return False, llm_reason
+
+
+def is_food_review_video(
+    title: str,
+    transcript_text: str,
+    video_description: str = "",
+    video_intel=None,
+) -> tuple[bool, str]:
+    """Backward-compatible wrapper around :func:`check_food_video`."""
+    return check_food_video(
+        title,
+        transcript_text=transcript_text,
+        video_description=video_description,
+        video_intel=video_intel,
+    )
 
 
 GENERIC_WORDS = {
