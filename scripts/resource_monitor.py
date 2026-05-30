@@ -127,8 +127,44 @@ class ResourceSnapshot:
         )
 
 
+def _gpu_memory_gb_gpustat() -> tuple[float | None, float | None, float | None]:
+    """Fallback when nvidia-smi is missing but gpustat is installed."""
+    try:
+        out = subprocess.run(
+            ["gpustat", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None, None, None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("gpustat memory probe failed: %s", exc)
+        return None, None, None
+
+    if out.returncode != 0 or not out.stdout.strip():
+        return None, None, None
+
+    try:
+        import json as _json
+
+        gpus = _json.loads(out.stdout).get("gpus") or []
+        if not gpus:
+            return None, None, None
+        g = gpus[0]
+        total_mb = float(g["memory.total"])
+        used_mb = float(g["memory.used"])
+    except (KeyError, TypeError, ValueError, _json.JSONDecodeError):
+        return None, None, None
+
+    total = total_mb / 1024.0
+    free = max(0.0, (total_mb - used_mb) / 1024.0)
+    used_pct = round(used_mb / total_mb * 100.0, 1) if total_mb > 0 else None
+    return round(total, 2), round(free, 2), used_pct
+
+
 def _gpu_memory_gb() -> tuple[float | None, float | None, float | None]:
-    """(total_gb, free_gb, used_percent) for the first CUDA GPU, via nvidia-smi."""
+    """(total_gb, free_gb, used_percent) for the first CUDA GPU."""
     try:
         out = subprocess.run(
             [
@@ -141,23 +177,23 @@ def _gpu_memory_gb() -> tuple[float | None, float | None, float | None]:
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None, None, None
+        return _gpu_memory_gb_gpustat()
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("nvidia-smi memory probe failed: %s", exc)
-        return None, None, None
+        return _gpu_memory_gb_gpustat()
 
     if out.returncode != 0 or not out.stdout.strip():
-        return None, None, None
+        return _gpu_memory_gb_gpustat()
 
     first = out.stdout.strip().splitlines()[0]
     parts = [p.strip() for p in first.split(",")]
     if len(parts) < 2:
-        return None, None, None
+        return _gpu_memory_gb_gpustat()
     try:
         total = float(parts[0]) / 1024.0
         free = float(parts[1]) / 1024.0
     except ValueError:
-        return None, None, None
+        return _gpu_memory_gb_gpustat()
     used_pct = round((total - free) / total * 100.0, 1) if total > 0 else None
     return round(total, 2), round(free, 2), used_pct
 
