@@ -117,14 +117,22 @@ def geocode_locale(
                 query, exactly_one=True, language=CONTENT_LANGUAGE
             )
             if location:
+                raw_addr = (location.raw or {}).get("address", {})
+                geocoded_city = (
+                    raw_addr.get("city")
+                    or raw_addr.get("town")
+                    or raw_addr.get("village")
+                    or ""
+                )
                 result = {
                     "lat": round(location.latitude, 4),
                     "lon": round(location.longitude, 4),
                     "display_name": location.address,
+                    "geocoded_city": geocoded_city,
                 }
                 cache[cache_key] = result
                 _save_geocode_cache(cache)
-                logger.info(f"Geocoded '{query}' -> ({result['lat']}, {result['lon']})")
+                logger.info(f"Geocoded '{query}' -> ({result['lat']}, {result['lon']}), city={geocoded_city!r}")
                 return result
 
         except (GeocoderTimedOut, GeocoderServiceError) as e:
@@ -162,6 +170,7 @@ def geocode_extractions(extractions: list[dict]) -> tuple[list[dict], list[dict]
         if result:
             ext["lat"] = result["lat"]
             ext["lon"] = result["lon"]
+            ext["geocoded_city"] = result.get("geocoded_city", "")
             if not ext.get("address") and result.get("display_name"):
                 ext["address"] = result["display_name"]
             geocoded.append(ext)

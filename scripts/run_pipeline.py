@@ -694,6 +694,7 @@ def run_pipeline(
                     extractions=extractions,
                     flagged_extractions=flagged_extractions,
                     trusted_venue_names=trusted_venue_names,
+                    intel_city=(video_intel.city if video_intel else ""),
                 )
 
                 if executor and executor.parallel_postprocess:
@@ -742,14 +743,25 @@ def run_pipeline(
                 recap.setdefault("outcome", "unknown")
                 run_report["videos"].append(recap)
 
+        finalize_results: list = []
         if executor:
-            executor.drain_finalize(_log)
+            finalize_results = executor.drain_finalize(_log)
             for fr in executor.poll_completed():
+                finalize_results.append(fr)
                 if fr.outcome == "processed":
                     dash.tick_stat("processed")
                 elif fr.outcome == "errored":
                     dash.tick_stat("errored")
                 _refresh_stats()
+
+        try:
+            from scripts.pipeline_metrics import record_run_metrics
+            record_run_metrics(
+                finalize_results,
+                run_id=run_report["started_at"],
+            )
+        except Exception as exc:
+            logger.warning("Could not record pipeline metrics: %s", exc)
 
         run_report["finished_at"] = datetime.now(timezone.utc).isoformat()
         run_report["summary"] = {

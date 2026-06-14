@@ -102,6 +102,7 @@ class FinalizeJob:
     extractions: list[dict]
     flagged_extractions: list[dict]
     trusted_venue_names: set[str] = field(default_factory=set)
+    intel_city: str = ""
 
 
 @dataclass
@@ -111,6 +112,24 @@ class FinalizeResult:
     flagged_segments: int = 0
     outcome: str = "processed"
     error: str = ""
+    # Per-video pipeline health counters (aggregated into run metrics)
+    extractions_attempted: int = 0
+    geocoded: int = 0
+    osm_verified: int = 0
+    published: int = 0
+    city_mismatches: int = 0
+    confidences: list[float] = field(default_factory=list)
+
+
+_CITY_COHERENCE_THRESHOLD = 75
+
+
+def _check_city_coherence(ext: dict, intel_city: str) -> bool:
+    """True = geocoded city is consistent with expected intel city (or either is unknown)."""
+    geocoded_city = (ext.get("geocoded_city") or "").strip()
+    if not intel_city or not geocoded_city:
+        return True
+    return fuzz.partial_ratio(intel_city.lower(), geocoded_city.lower()) >= _CITY_COHERENCE_THRESHOLD
 
 
 def _is_trusted(ext: dict, trusted_names: set[str]) -> bool:
@@ -144,7 +163,7 @@ def _publishable_extraction(ext: dict, trusted: set[str]) -> tuple[bool, str]:
 
 
 def finalize_video(job: FinalizeJob, log: LogFn | None = None) -> FinalizeResult:
-    """Geocode → OSM verify → dedupe → populate JSON → mark processed."""
+    """Geocode → city-coherence → OSM verify → dedupe → populate JSON → mark processed."""
     _log = log or logger.info
 
     try:
@@ -157,16 +176,17 @@ def finalize_video(job: FinalizeJob, log: LogFn | None = None) -> FinalizeResult
         extractions = list(job.extractions)
         flagged_extractions = list(job.flagged_extractions)
         trusted = job.trusted_venue_names
+        n_attempted = len(extractions)
+        n_geocoded = n_osm = n_published = n_city_mismatch = 0
+        confidences: list[float] = []
 
         if extractions:
             _log(f"  [{job.video_id}] Geocoding {len(extractions)} locales (background)…")
             geocoded, non_geocoded = geocode_extractions(extractions)
+            n_geocoded = len(geocoded)
             for e in non_geocoded:
                 if _is_trusted(e, trusted):
-                    _log(
-                        f"  [{job.video_id}] Geocoding failed for trusted "
-                        f"'{e.get('locale_name')}' — keeping with default coords"
-                    )
+                    _log(f"  [{job.video_id}] Geocoding failed for trusted '{e.get('locale_name')}' — keeping with default coords")
                     e["lat"] = 0.0
                     e["lon"] = 0.0
                     geocoded.append(e)
@@ -176,9 +196,23 @@ def finalize_video(job: FinalizeJob, log: LogFn | None = None) -> FinalizeResult
                     flagged_extractions.append(e)
             extractions = geocoded
 
+            coherent: list[dict] = []
+            for e in extractions:
+                if _check_city_coherence(e, job.intel_city):
+                    coherent.append(e)
+                else:
+                    n_city_mismatch += 1
+                    fe = dict(e)
+                    fe["confidence"] = min(float(fe.get("confidence", 0.5)), 0.45)
+                    fe["_flag_reason"] = "city_mismatch"
+                    flagged_extractions.append(fe)
+                    _log(f"  [{job.video_id}] City mismatch '{e.get('locale_name')}': geocoded={e.get('geocoded_city')!r} vs expected={job.intel_city!r}")
+            extractions = coherent
+
         if extractions:
             _log(f"  [{job.video_id}] Verifying {len(extractions)} locales on OSM…")
             verified, not_verified = verify_extractions(extractions)
+            n_osm = len(verified)
             for e in not_verified:
                 if _is_trusted(e, trusted):
                     e["osm_verified"] = False
@@ -194,15 +228,15 @@ def finalize_video(job: FinalizeJob, log: LogFn | None = None) -> FinalizeResult
             ok_pub, why = _publishable_extraction(e, trusted)
             if ok_pub:
                 publishable.append(e)
+                confidences.append(float(e.get("confidence", 0.0)))
             else:
                 fe = dict(e)
                 fe["confidence"] = min(float(fe.get("confidence", 0.5)), 0.45)
                 fe["_flag_reason"] = why
                 flagged_extractions.append(fe)
-                _log(
-                    f"  [{job.video_id}] Non pubblicato '{e.get('locale_name')}': {why}"
-                )
+                _log(f"  [{job.video_id}] Non pubblicato '{e.get('locale_name')}': {why}")
         extractions = publishable
+        n_published = len(extractions)
 
         if extractions:
             _log(f"  [{job.video_id}] Deduplicating…")
@@ -234,6 +268,12 @@ def finalize_video(job: FinalizeJob, log: LogFn | None = None) -> FinalizeResult
             visits_created=len(new_visits),
             flagged_segments=len(flagged_extractions),
             outcome="processed",
+            extractions_attempted=n_attempted,
+            geocoded=n_geocoded,
+            osm_verified=n_osm,
+            published=n_published,
+            city_mismatches=n_city_mismatch,
+            confidences=confidences,
         )
     except Exception as exc:
         logger.exception("Finalize failed for %s", job.video_id)
