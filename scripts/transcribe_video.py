@@ -18,8 +18,10 @@ __author__ = "Luca Ostinelli"
 
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from scripts.hardware import get_profile
@@ -357,6 +359,20 @@ def find_audio_file(video_id: str) -> Path | None:
     return None
 
 
+def _write_transcript_atomic(path: Path, transcript: dict) -> None:
+    fd, tmp = tempfile.mkstemp(suffix=".json.tmp", prefix=".transcript.", dir=str(path.parent), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(transcript, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def transcribe_audio(video_id: str, model_name: str = WHISPER_DEFAULT_MODEL) -> dict | None:
     """
     Get transcription for a video.
@@ -395,8 +411,7 @@ def transcribe_audio(video_id: str, model_name: str = WHISPER_DEFAULT_MODEL) -> 
         transcript = _parse_vtt(subs_path)
         if transcript and len(transcript.get("segments", [])) > 0:
             ensure_dirs()
-            with open(transcript_path, "w", encoding="utf-8") as f:
-                json.dump(transcript, f, ensure_ascii=False, indent=2)
+            _write_transcript_atomic(transcript_path, transcript)
             logger.info(
                 f"✓ Using YouTube manual subs for {video_id} "
                 f"({len(transcript['segments'])} segments)"
@@ -480,8 +495,7 @@ def transcribe_audio(video_id: str, model_name: str = WHISPER_DEFAULT_MODEL) -> 
     }
 
     ensure_dirs()
-    with open(transcript_path, "w", encoding="utf-8") as f:
-        json.dump(transcript, f, ensure_ascii=False, indent=2)
+    _write_transcript_atomic(transcript_path, transcript)
 
     logger.info(f"Transcription complete: {len(segments)} segments, {len(transcript['text'])} chars")
     return transcript

@@ -21,8 +21,9 @@ def test_youtube_timestamp_url():
 def test_submit_report(tmp_path, monkeypatch):
     reports_path = tmp_path / "locale_reports.json"
     monkeypatch.setattr("scripts.review_queue.LOCALE_REPORTS_JSON", reports_path)
-    monkeypatch.setattr("scripts.review_queue.load_json", lambda _p: [])
-    monkeypatch.setattr("scripts.review_queue.save_json", lambda _p, data: None)
+    # Don't mock save_json/load_json — let them operate on the tmp path so the
+    # file-write assertion below actually works.
+    monkeypatch.setattr("scripts.review_queue.CORRECTIONS_JSON", tmp_path / "corrections.json")
 
     entry = submit_report(
         locale_name="Fake Place",
@@ -32,6 +33,7 @@ def test_submit_report(tmp_path, monkeypatch):
     )
     assert entry["locale_name"] == "Fake Place"
     assert entry["status"] == "open"
+    assert reports_path.exists()
     assert reports_path.read_text(encoding="utf-8").count("Fake Place") == 1
 
 

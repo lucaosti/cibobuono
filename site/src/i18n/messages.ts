@@ -48,6 +48,7 @@ export interface Messages {
   googleMaps: string;
   edit: string;
   cancel: string;
+  close: string;
   suggestCorrection: string;
   submitEdit: string;
   reportFalsePositive: string;
@@ -114,6 +115,7 @@ export const en: Messages = {
   googleMaps: "Google Maps",
   edit: "Edit",
   cancel: "Cancel",
+  close: "Close",
   suggestCorrection: "Suggest correction",
   submitEdit: "Submit edit",
   reportFalsePositive: "Report false positive",
@@ -196,6 +198,7 @@ export const it: Messages = {
   googleMaps: "Google Maps",
   edit: "Modifica",
   cancel: "Annulla",
+  close: "Chiudi",
   suggestCorrection: "Suggerisci correzione",
   submitEdit: "Invia modifica",
   reportFalsePositive: "Segnala falso positivo",

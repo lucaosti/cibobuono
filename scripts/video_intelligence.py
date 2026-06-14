@@ -88,9 +88,10 @@ def _extract_title_rating(title: str) -> str | None:
     if not m:
         return None
     raw = m.group(1).strip().lower()
+    if not raw:
+        return None
     if raw in _ITALIAN_NUMBERS:
         return _ITALIAN_NUMBERS[raw]
-    # Numeric with optional modifiers
     if raw[0].isdigit():
         return raw
     return None

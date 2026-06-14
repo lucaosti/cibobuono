@@ -24,7 +24,6 @@ from scripts.utils import (
     DEDUP_NAME_SIMILARITY_THRESHOLD,
     LOCALES_JSON,
     load_json,
-    save_json,
     save_json_split,
     setup_logging,
 )

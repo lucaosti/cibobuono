@@ -11,6 +11,7 @@ __author__ = "Luca Ostinelli"
 
 import hashlib
 import json
+import time
 from typing import Any
 
 from scripts.utils import (
@@ -180,7 +181,7 @@ def submit_report(
         youtube_url = f"https://youtu.be/{video_id}"
 
     report_id = hashlib.sha256(
-        f"{visit_id}|{locale_id}|{locale_name}|{today_str()}".encode()
+        f"{visit_id}|{locale_id}|{locale_name}|{today_str()}|{time.monotonic_ns()}".encode()
     ).hexdigest()[:12]
 
     entry = {
@@ -195,10 +196,7 @@ def submit_report(
         "reported_at": today_str(),
     }
     reports.append(entry)
-    LOCALE_REPORTS_JSON.write_text(
-        json.dumps(reports, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    save_json(LOCALE_REPORTS_JSON, reports)
 
     if locale_id:
         corrections = load_json(CORRECTIONS_JSON)
@@ -218,15 +216,15 @@ def submit_report(
 def resolve_report(report_id: str, *, action: str = "resolved") -> tuple[bool, str]:
     if not LOCALE_REPORTS_JSON.exists():
         return False, "Nessuna segnalazione"
-    reports = json.loads(LOCALE_REPORTS_JSON.read_text(encoding="utf-8"))
+    try:
+        reports = json.loads(LOCALE_REPORTS_JSON.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False, "File segnalazioni illeggibile"
     for r in reports:
         if r.get("report_id") == report_id:
             r["status"] = action
             r["resolved_at"] = today_str()
-            LOCALE_REPORTS_JSON.write_text(
-                json.dumps(reports, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            save_json(LOCALE_REPORTS_JSON, reports)
             return True, "Segnalazione aggiornata"
     return False, "Segnalazione non trovata"
 

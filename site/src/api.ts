@@ -3,9 +3,15 @@ import type { Channel, Locale, Visit, Video, FlaggedSegment, Correction } from "
 const BASE = import.meta.env.BASE_URL; // "/cibobuono/" in prod
 
 async function fetchJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}data/${path}`);
-  if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status}`);
-  return res.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch(`${BASE}data/${path}`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Failed to fetch ${path}: ${res.status}`);
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -15,7 +21,7 @@ async function fetchJson<T>(path: string): Promise<T> {
  */
 async function fetchPaged<T>(filename: string): Promise<T[]> {
   const data = await fetchJson<T[] | { _pages: number }>(filename);
-  if (!Array.isArray(data) && typeof data === "object" && "_pages" in data) {
+  if (data !== null && !Array.isArray(data) && typeof data === "object" && "_pages" in data) {
     const n = (data as { _pages: number })._pages;
     const stem = filename.replace(/\.json$/, "");
     const pages = await Promise.all(

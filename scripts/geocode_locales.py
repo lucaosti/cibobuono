@@ -11,6 +11,8 @@ from __future__ import annotations
 __author__ = "Luca Ostinelli"
 
 import json
+import os
+import tempfile
 import time
 
 from scripts.utils import CACHE_DIR, CONTENT_LANGUAGE, ensure_dirs, setup_logging
@@ -39,8 +41,19 @@ def _load_geocode_cache() -> dict:
 
 def _save_geocode_cache(cache: dict) -> None:
     ensure_dirs()
-    with open(GEOCODE_CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+    fd, tmp = tempfile.mkstemp(
+        suffix=".json.tmp", prefix=".geocode_cache.", dir=str(GEOCODE_CACHE_FILE.parent), text=True
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, GEOCODE_CACHE_FILE)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _rate_limit():

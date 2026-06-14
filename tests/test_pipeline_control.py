@@ -14,13 +14,17 @@ def ctrl_env(tmp_path, monkeypatch):
     monkeypatch.setattr(pc, "CONTROL_PATH", tmp_path / "control.json")
     monkeypatch.setattr(pc, "PID_PATH", tmp_path / "pipeline.pid")
     monkeypatch.setattr(pc, "LOGS_DIR", tmp_path)
-    for name, rel in pc.EDITABLE_FILES.items():
+
+    # Redirect every editable file to tmp_path so tests never touch real data.
+    fake_files: dict[str, object] = {}
+    for name in pc.EDITABLE_FILES:
+        dest = tmp_path / name
         if name.endswith(".txt"):
-            rel.parent.mkdir(parents=True, exist_ok=True)
-            rel.write_text("https://youtube.com/@test\n", encoding="utf-8")
+            dest.write_text("https://youtube.com/@test\n", encoding="utf-8")
         else:
-            rel.parent.mkdir(parents=True, exist_ok=True)
-            rel.write_text("[]", encoding="utf-8")
+            dest.write_text("[]", encoding="utf-8")
+        fake_files[name] = dest
+    monkeypatch.setattr(pc, "EDITABLE_FILES", fake_files)
     return tmp_path
 
 

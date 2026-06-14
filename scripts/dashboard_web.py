@@ -198,14 +198,20 @@ class _Handler(BaseHTTPRequestHandler):
 
         self.send_error(404)
 
+    _MAX_BODY = 2 * 1024 * 1024  # 2 MB — sufficient for any editable JSON
+
     def _read_json(self) -> dict | None:
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (ValueError, TypeError):
+            length = 0
         if length <= 0:
             return {}
+        length = min(length, self._MAX_BODY)
         raw = self.rfile.read(length)
         try:
             return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return None
 
     def _json(self, data: dict, *, status: int = 200) -> None:

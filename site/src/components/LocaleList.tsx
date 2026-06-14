@@ -94,7 +94,7 @@ function EditForm({ locale, onClose }: EditFormProps) {
     <div className="edit-form" onClick={(e) => e.stopPropagation()}>
       <div className="edit-form-header">
         <strong>{t.suggestCorrection}</strong>
-        <button className="edit-close" onClick={onClose}>
+        <button className="edit-close" onClick={onClose} aria-label={t.close}>
           &times;
         </button>
       </div>

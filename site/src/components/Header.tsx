@@ -52,6 +52,7 @@ export default function Header({
           onChange={(e) => onCityChange(e.target.value)}
           className="filter-select"
           title={t.filterByCityTitle}
+          aria-label={t.filterByCityTitle}
         >
           <option value="">{t.allCities}</option>
           {cities.map((c) => (
@@ -66,6 +67,7 @@ export default function Header({
           onChange={(e) => onSentimentChange(e.target.value)}
           className="filter-select"
           title={t.filterBySentimentTitle}
+          aria-label={t.filterBySentimentTitle}
         >
           <option value="">{t.allSentiments}</option>
           <option value="positive">{t.sentimentPositive}</option>
@@ -82,6 +84,7 @@ export default function Header({
             }}
             className="filter-select"
             title={t.nearMeTitle}
+            aria-label={t.nearMeTitle}
           >
             <option value="">{t.nearMe}</option>
             <option value="1">{t.km(1)}</option>
@@ -92,7 +95,12 @@ export default function Header({
             <option value="50">{t.km(50)}</option>
           </select>
           {geoError && (
-            <span className="geo-error" title={geoError}>
+            <span
+              className="geo-error"
+              title={geoError}
+              role="alert"
+              aria-label={geoError}
+            >
               {t.geoErrorMarker}
             </span>
           )}

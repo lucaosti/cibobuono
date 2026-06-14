@@ -42,11 +42,14 @@ def git_commit_and_push(message: str | None = None) -> bool:
 
         for f in json_files:
             rel_path = f.relative_to(PROJECT_ROOT)
-            subprocess.run(
+            add_result = subprocess.run(
                 ["git", "add", str(rel_path)],
+                capture_output=True,
                 cwd=str(PROJECT_ROOT),
                 timeout=10,
             )
+            if add_result.returncode != 0:
+                logger.warning("git add %s failed: %s", rel_path, add_result.stderr.strip())
 
         result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],

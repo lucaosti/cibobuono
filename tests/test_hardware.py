@@ -425,11 +425,23 @@ def test_detect_raspberry_pi_parses_nul_terminated_string(
 
 
 def test_detect_cuda_returns_false_when_nvidia_smi_missing(monkeypatch):
-    """No nvidia-smi binary → has_cuda=False, no crash."""
+    """No nvidia-smi binary and no PyTorch CUDA → has_cuda=False, no crash."""
     def _raise(*args, **kwargs):
         raise FileNotFoundError("nvidia-smi")
 
     monkeypatch.setattr(subprocess, "run", _raise)
+
+    # Also neutralise the PyTorch fallback so the test isn't environment-dependent.
+    import sys
+    import types
+
+    fake_cuda = types.SimpleNamespace(
+        is_available=lambda: False,
+        device_count=lambda: 0,
+    )
+    fake_torch = types.SimpleNamespace(cuda=fake_cuda)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
     has, name, vram = hardware._detect_cuda()
     assert has is False
     assert name is None
