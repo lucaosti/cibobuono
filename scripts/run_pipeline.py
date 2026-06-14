@@ -44,8 +44,6 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from thefuzz import fuzz
-
 from scripts.chunk_transcription import seconds_to_timestamp as _stt
 from scripts.dashboard import Dashboard
 from scripts.hardware import get_profile

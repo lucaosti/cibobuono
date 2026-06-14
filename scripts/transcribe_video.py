@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from scripts.hardware import get_profile
@@ -42,6 +43,7 @@ _BACKEND_FASTER = "faster_whisper"
 _BACKEND_OPENAI = "openai_whisper"
 
 # Global Whisper model cache (loaded once per session, like the LLM)
+_whisper_lock = threading.Lock()
 _whisper_model = None
 _whisper_model_name = None
 _whisper_backend = None
@@ -257,11 +259,24 @@ def _get_whisper_model(model_name: str = WHISPER_DEFAULT_MODEL):
     Tries faster-whisper first (CTranslate2 — CUDA fp16 / CPU int8) and falls
     back to openai-whisper, which can use Metal via PyTorch MPS. Device and
     compute-type defaults come from :func:`scripts.hardware.get_profile`.
+    Thread-safe: concurrent callers block until the model is loaded once.
     """
     global _whisper_model, _whisper_model_name, _whisper_backend, _whisper_device
 
+    # Fast path — no lock needed: model already loaded for this name.
     if _whisper_model is not None and _whisper_model_name == model_name:
         return _whisper_model, _whisper_backend
+
+    with _whisper_lock:
+        # Re-check under lock in case another thread finished loading.
+        if _whisper_model is not None and _whisper_model_name == model_name:
+            return _whisper_model, _whisper_backend
+        return _load_whisper_model_locked(model_name)
+
+
+def _load_whisper_model_locked(model_name: str):
+    """Inner loader — must be called with _whisper_lock held."""
+    global _whisper_model, _whisper_model_name, _whisper_backend, _whisper_device
 
     from scripts.utils import MODELS_DIR
     download_root = str(MODELS_DIR / "whisper")
@@ -333,12 +348,13 @@ def _get_whisper_model(model_name: str = WHISPER_DEFAULT_MODEL):
 def release_whisper_model() -> None:
     """Unload Whisper from GPU/RAM so the LLM can use VRAM without contention."""
     global _whisper_model, _whisper_model_name, _whisper_backend, _whisper_device
-    if _whisper_model is None:
-        return
-    _whisper_model = None
-    _whisper_model_name = None
-    _whisper_backend = None
-    _whisper_device = None
+    with _whisper_lock:
+        if _whisper_model is None:
+            return
+        _whisper_model = None
+        _whisper_model_name = None
+        _whisper_backend = None
+        _whisper_device = None
     try:
         import gc
         gc.collect()

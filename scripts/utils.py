@@ -285,9 +285,15 @@ def cleanup_cache(max_files: int = MAX_CACHED_VIDEOS) -> list[str]:
         ]
         for companion in companions:
             if companion.exists():
-                companion.unlink()
+                try:
+                    companion.unlink()
+                except OSError:
+                    pass
         for sub in f.parent.glob(f"{stem}_subs.*"):
-            sub.unlink()
+            try:
+                sub.unlink()
+            except OSError:
+                pass
     return deleted
 
 

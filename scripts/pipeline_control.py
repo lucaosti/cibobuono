@@ -206,17 +206,18 @@ def start_pipeline(*, max_videos: int = 0) -> tuple[bool, str]:
         "--skip-push",
         "--no-dashboard",
         "--max-videos",
-        str(max_videos),
+        str(int(max_videos)),
     ]
     log_path = LOGS_DIR / "pipeline.log"
-    log_fh = open(log_path, "a", encoding="utf-8")
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(PROJECT_ROOT),
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    with open(log_path, "a", encoding="utf-8") as log_fh:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    # log_fh is closed here; the child process keeps its own copy of the fd
     mark_started(pid=proc.pid, max_videos=max_videos)
     label = f"{max_videos} video" if max_videos > 0 else "tutti i pending"
     return True, f"Pipeline avviata (pid {proc.pid}, {label})"

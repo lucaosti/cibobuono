@@ -60,6 +60,12 @@ PRICE_RATING_PAT = re.compile(
     re.I,
 )
 
+# Precompiled combined pattern for O(1) food-noun detection instead of O(n) per-word regex.
+_FOOD_LEXICON_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(FOOD_LEXICON, key=len, reverse=True)) + r")\b",
+    re.I,
+)
+
 _VISIT_SYSTEM = (
     "You decide if an Italian food vlog excerpt shows the host PHYSICALLY at the named place "
     "(eating, ordering, on location). Answer ONLY JSON."
@@ -97,10 +103,7 @@ def get_transcript_window(
 
 
 def _window_has_food_noun(window_lower: str) -> bool:
-    for w in FOOD_LEXICON:
-        if re.search(rf"\b{re.escape(w)}\b", window_lower):
-            return True
-    return False
+    return bool(_FOOD_LEXICON_RE.search(window_lower))
 
 
 def _name_near_pattern(window: str, pat: re.Pattern[str], name: str) -> bool:

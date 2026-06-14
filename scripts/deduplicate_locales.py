@@ -17,6 +17,7 @@ __author__ = "Luca Ostinelli"
 
 
 import math
+import re
 from urllib.parse import quote_plus
 
 from scripts.utils import (
@@ -31,12 +32,12 @@ from scripts.schemas import Locale, generate_locale_id
 
 logger = setup_logging("dedup")
 
+_EARTH_RADIUS_M = 6371000  # WGS-84 mean radius
+
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Calculate distance in meters between two points using the Haversine formula.
-    """
-    R = 6371000  # Earth radius in meters
+    """Calculate distance in meters between two points using the Haversine formula."""
+    R = _EARTH_RADIUS_M
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
@@ -60,10 +61,9 @@ _NOISE_WORDS = {
 
 def _normalize_for_dedup(name: str) -> str:
     """Strip noise words and punctuation so core tokens are compared."""
-    import re as _re
     name = name.lower().strip()
-    name = _re.sub(r"[''`]", "'", name)
-    name = _re.sub(r"[^\w\s']", " ", name)
+    name = re.sub(r"[''`]", "'", name)
+    name = re.sub(r"[^\w\s']", " ", name)
     tokens = [t for t in name.split() if t not in _NOISE_WORDS]
     return " ".join(tokens) if tokens else name.lower().strip()
 

@@ -402,6 +402,10 @@ def extract_all_chunks_candidates(
         for fut in as_completed(futs):
             chunk = futs[fut]
             idx = int(chunk.get("chunk_index", 0))
-            out[idx] = fut.result()
+            try:
+                out[idx] = fut.result()
+            except Exception as exc:
+                logger.warning("NER failed for chunk %d: %s", idx, exc)
+                out[idx] = ([], [])
     logger.info(f"Parallel NER: {len(chunks)} chunks with {workers} workers")
     return out
