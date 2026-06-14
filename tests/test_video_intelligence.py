@@ -9,6 +9,7 @@ __author__ = "Luca Ostinelli"
 import pytest
 from scripts.video_intelligence import (
     VideoIntel,
+    analyze_comments,
     analyze_title,
     analyze_chapters,
     parse_description_timestamps,
@@ -252,3 +253,73 @@ class TestParseDescriptionTimestamps:
         desc = "0:30 " + "x" * 250
         result = parse_description_timestamps(desc)
         assert len(result[0]["label"]) == 200
+
+
+class TestAnalyzeComments:
+    def _base_intel(self) -> VideoIntel:
+        return VideoIntel(video_type="multi_venue_tour")
+
+    def _comment(self, text: str, likes: int = 0) -> dict:
+        return {"text": text, "like_count": likes}
+
+    def test_empty_comments_returns_unchanged(self):
+        intel = self._base_intel()
+        result = analyze_comments([], intel)
+        assert result.venue_hints == []
+
+    def test_single_mention_below_threshold_ignored(self):
+        # Only 1 mention — threshold requires >= 2
+        comments = [self._comment("vi consiglio la pizzeria Da Remo")]
+        intel = analyze_comments(comments, self._base_intel())
+        assert intel.venue_hints == []
+
+    def test_two_mentions_added(self):
+        # Both comments use 'andate da' pattern so they produce identical match keys
+        comments = [
+            self._comment("andate da Pizzarium!"),
+            self._comment("andate da Pizzarium!"),
+        ]
+        intel = analyze_comments(comments, self._base_intel())
+        names = [h["name"].lower() for h in intel.venue_hints]
+        assert any("pizzarium" in n for n in names)
+
+    def test_high_like_comment_counts_double(self):
+        # One comment with ≥5 likes → counts as 2; no second comment needed
+        # Use trailing punctuation so match stops cleanly at the name
+        comments = [self._comment("andate da Pizzarium!", likes=10)]
+        intel = analyze_comments(comments, self._base_intel())
+        names = [h["name"].lower() for h in intel.venue_hints]
+        assert any("pizzarium" in n for n in names)
+
+    def test_original_casing_preserved(self):
+        # First occurrence casing should be preserved, not .title()
+        comments = [
+            self._comment("andate da Sora Lella!"),
+            self._comment("consiglio da Sora Lella!"),
+        ]
+        intel = analyze_comments(comments, self._base_intel())
+        names = [h["name"] for h in intel.venue_hints]
+        assert any("Sora Lella" in n for n in names)
+
+    def test_does_not_duplicate_existing_hint(self):
+        intel = self._base_intel()
+        intel.venue_hints = [{"name": "Da Remo", "source": "chapter", "confidence": "high"}]
+        comments = [
+            self._comment("pizzeria Da Remo è top"),
+            self._comment("sì pizzeria Da Remo ottima"),
+        ]
+        result = analyze_comments(comments, intel)
+        da_remo_count = sum(1 for h in result.venue_hints if "remo" in h["name"].lower())
+        assert da_remo_count == 1  # not duplicated
+
+    def test_short_comments_ignored(self):
+        comments = [self._comment("ok"), self._comment("ok")]
+        intel = analyze_comments(comments, self._base_intel())
+        assert intel.venue_hints == []
+
+    def test_confidence_high_for_many_mentions(self):
+        comments = [self._comment(f"ristorante Sant'Isidoro visita {i}") for i in range(5)]
+        intel = analyze_comments(comments, self._base_intel())
+        if intel.venue_hints:
+            confidences = [h["confidence"] for h in intel.venue_hints if "isidoro" in h["name"].lower()]
+            assert any(c == "high" for c in confidences)

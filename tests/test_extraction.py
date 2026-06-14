@@ -334,3 +334,61 @@ class TestRatingNumericCore:
         assert rating_numeric_core("8--") == 8.0
         assert rating_numeric_core("6++") == 6.0
         assert rating_numeric_core("10") == 10.0
+
+
+class TestGetLlmCaching:
+    """Verify get_llm() caches the result in _llm_instance on direct load path."""
+
+    def test_result_is_cached_after_first_call(self):
+        import scripts.extract_locales as el
+
+        original_instance = el._llm_instance
+        original_future = el._llm_load_future
+        try:
+            el._llm_instance = None
+            el._llm_load_future = None
+            fake_model = object()
+            call_count = {"n": 0}
+
+            def _fake_load():
+                call_count["n"] += 1
+                return fake_model
+
+            with patch.object(el, "_load_llm_impl", side_effect=_fake_load):
+                result1 = el.get_llm()
+                result2 = el.get_llm()
+
+            assert result1 is fake_model
+            assert result2 is fake_model
+            # _load_llm_impl must only have been called ONCE (second call uses cache)
+            assert call_count["n"] == 1
+        finally:
+            el._llm_instance = original_instance
+            el._llm_load_future = original_future
+
+    def test_none_result_not_cached(self):
+        """When hardware disables LLM (returns None), we should retry on next call."""
+        import scripts.extract_locales as el
+
+        original_instance = el._llm_instance
+        original_future = el._llm_load_future
+        try:
+            el._llm_instance = None
+            el._llm_load_future = None
+            call_count = {"n": 0}
+
+            def _fake_load_none():
+                call_count["n"] += 1
+                return None
+
+            with patch.object(el, "_load_llm_impl", side_effect=_fake_load_none):
+                result1 = el.get_llm()
+                result2 = el.get_llm()
+
+            assert result1 is None
+            assert result2 is None
+            # Both calls should have tried to load (None is not cached)
+            assert call_count["n"] == 2
+        finally:
+            el._llm_instance = original_instance
+            el._llm_load_future = original_future
