@@ -70,7 +70,10 @@ def get_llm():
         if _llm_load_future is not None:
             fut = _llm_load_future
         else:
-            return _load_llm_impl()
+            result = _load_llm_impl()
+            if result is not None:
+                _llm_instance = result  # cache successful load
+            return result
 
     try:
         loaded = fut.result()
@@ -78,7 +81,11 @@ def get_llm():
         logger.error("Background LLM preload failed: %s", exc)
         with _llm_load_lock:
             _llm_load_future = None
-        return _load_llm_impl()
+        result = _load_llm_impl()
+        if result is not None:
+            with _llm_load_lock:
+                _llm_instance = result
+        return result
 
     with _llm_load_lock:
         if _llm_instance is None and loaded is not None:

@@ -415,8 +415,8 @@ class Dashboard:
                 except OSError:
                     pass
                 raise
-        except OSError:
-            pass  # dashboard must never break the pipeline
+        except OSError as _e:
+            logger.debug("Dashboard snapshot write failed (non-critical): %s", _e)
 
     @staticmethod
     def load_snapshot() -> dict | None:

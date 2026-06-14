@@ -477,6 +477,7 @@ def analyze_comments(comments: list[dict], intel: VideoIntel) -> VideoIntel:
 
     existing = {h["name"].lower() for h in intel.venue_hints}
     mention_counts: dict[str, int] = {}
+    first_display: dict[str, str] = {}  # key -> original-casing from first occurrence
 
     for c in comments:
         text = c.get("text") or ""
@@ -488,22 +489,15 @@ def analyze_comments(comments: list[dict], intel: VideoIntel) -> VideoIntel:
                 if len(name) < 3 or name.lower() in existing:
                     continue
                 key = name.lower()
+                if key not in first_display:
+                    first_display[key] = name
                 mention_counts[key] = mention_counts.get(key, 0) + 1 + (1 if c.get("like_count", 0) >= 5 else 0)
 
     added = 0
     for key, count in sorted(mention_counts.items(), key=lambda x: -x[1]):
         if count < 2:
             continue
-        # Recover original casing from first matching comment
-        display = key.title()
-        for c in comments:
-            if key in (c.get("text") or "").lower():
-                for pat in _COMMENT_VENUE_PATTERNS:
-                    m = pat.search(c["text"])
-                    if m and m.group(1).strip().lower() == key:
-                        display = m.group(1).strip()
-                        break
-                break
+        display = first_display.get(key, key.title())
         if display.lower() in existing:
             continue
         intel.venue_hints.append(
