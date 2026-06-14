@@ -45,6 +45,9 @@ OVERPASS_URLS = [
 SEARCH_RADIUS_METERS = 500
 FALLBACK_RADIUS_METERS = 1000
 MIN_NAME_MATCH_SCORE = 80
+# Length-ratio gates: skip fuzzy scoring when names are too length-dissimilar.
+_MIN_LENGTH_RATIO = 0.35    # below this → almost certainly different venues
+_PARTIAL_RATIO_MIN = 0.5   # above this → partial_ratio is also informative
 
 _last_overpass_time = 0.0
 OVERPASS_MIN_INTERVAL = 4.0  # seconds between ANY two Overpass requests
@@ -177,7 +180,7 @@ def _find_best_match(locale_name: str, places: list[dict]) -> dict | None:
 
         shorter = min(len(norm_target), len(norm_osm))
         longer = max(len(norm_target), len(norm_osm))
-        if shorter / longer < 0.35:
+        if shorter / longer < _MIN_LENGTH_RATIO:
             continue
 
         scores = [
@@ -185,7 +188,7 @@ def _find_best_match(locale_name: str, places: list[dict]) -> dict | None:
             fuzz.token_sort_ratio(norm_target, norm_osm),
             fuzz.token_set_ratio(norm_target, norm_osm),
         ]
-        if shorter / longer >= 0.5:
+        if shorter / longer >= _PARTIAL_RATIO_MIN:
             scores.append(fuzz.partial_ratio(norm_target, norm_osm))
 
         score = max(scores)

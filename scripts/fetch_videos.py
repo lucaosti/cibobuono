@@ -174,7 +174,8 @@ def fetch_video_list(channel_url: str) -> list[dict]:
                         "upload_date": upload_date,
                         "duration": duration,
                     })
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                logger.debug("Skipping malformed yt-dlp JSON line for %s: %s", channel_url, exc)
                 continue
 
         return videos

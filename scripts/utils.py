@@ -142,6 +142,9 @@ def setup_logging(name: str = "pipeline") -> logging.Logger:
     return logger
 
 
+logger = setup_logging("utils")
+
+
 def load_json(path: Path) -> list:
     """Load a JSON list, transparently reassembling paged files written by
     :func:`save_json_split` (sentinel ``{"_pages": N}`` + ``stem_0.json`` …)."""
@@ -156,7 +159,7 @@ def load_json(path: Path) -> list:
             for i in range(n):
                 chunk_path = path.parent / f"{path.stem}_{i}.json"
                 if not chunk_path.exists():
-                    logging.getLogger("utils").warning(
+                    logger.warning(
                         "Missing page %s for %s", chunk_path.name, path.name
                     )
                     continue
@@ -167,10 +170,10 @@ def load_json(path: Path) -> list:
             return merged
         return data if isinstance(data, list) else []
     except json.JSONDecodeError as e:
-        logging.getLogger("utils").warning(f"Corrupted JSON in {path}: {e}")
+        logger.warning(f"Corrupted JSON in {path}: {e}")
         return []
     except OSError as e:
-        logging.getLogger("utils").error(f"Cannot read {path}: {e}")
+        logger.error(f"Cannot read {path}: {e}")
         return []
 
 
@@ -244,7 +247,7 @@ def save_json_split(path: Path, data: list) -> None:
             pass
         raise
 
-    logging.getLogger("utils").info(
+    logger.info(
         f"Split {path.name} into {len(chunks)} pages "
         f"({len(encoded) / 1024 / 1024:.1f} MB total)"
     )
