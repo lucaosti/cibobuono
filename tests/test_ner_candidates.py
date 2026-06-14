@@ -92,3 +92,30 @@ def test_parallel_ner_all_chunks(monkeypatch):
     names = {v.name for venues, _ in out.values() for v in venues}
     assert any("Rossi" in n or "Forno" in n for n in names)
     assert any("Bianchi" in n for n in names)
+
+
+def test_parallel_ner_chunk_exception_does_not_crash(monkeypatch):
+    """A failing chunk should return empty candidates; other chunks proceed normally."""
+    call_count = {"n": 0}
+
+    def _raise_on_first(chunk, **kwargs):
+        call_count["n"] += 1
+        if chunk.get("chunk_index") == 0:
+            raise RuntimeError("NER exploded")
+        # Heuristic fallback for other chunks
+        from scripts.ner_candidates import extract_chunk_candidates
+        monkeypatch.setattr("scripts.ner_candidates.get_gliner", lambda: None)
+        return extract_chunk_candidates(chunk, **kwargs)
+
+    from scripts.ner_candidates import extract_all_chunks_candidates
+    monkeypatch.setattr("scripts.ner_candidates.extract_chunk_candidates", _raise_on_first)
+
+    chunks = [
+        {"chunk_index": 0, "start_time": 0.0, "text": "A", "segment_timestamps": []},
+        {"chunk_index": 1, "start_time": 10.0, "text": "B", "segment_timestamps": []},
+    ]
+    out = extract_all_chunks_candidates(chunks, max_workers=2)
+    # Both chunk indices present in output
+    assert 0 in out and 1 in out
+    # The failing chunk returns empty tuple
+    assert out[0] == ([], [])
