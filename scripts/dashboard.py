@@ -471,16 +471,16 @@ class Dashboard:
         header = Text()
         header.append("🍕 CiboBuono Pipeline ", style="bold yellow")
         header.append(f"— {s.phase}", style="bold white")
-        header.append(f"  ⏱ run {self._fmt_time(time.time() - s.start_time)}", style="dim")
+        header.append(f"  ⏱ {self._fmt_time(time.time() - s.start_time)}", style="dim")
         if s.pending:
-            header.append(f"  · {s.pending} video in coda", style="cyan")
+            header.append(f"  · {s.pending} in coda", style="cyan")
 
         stats_table = Table.grid(padding=(0, 2))
         stats_table.add_column(justify="right", style="dim")
         stats_table.add_column(style="bold")
         stats_table.add_column(justify="right", style="dim")
         stats_table.add_column(style="bold")
-        stats_table.add_row("Canali", str(s.channels), "Video totali", str(s.total_in_db))
+        stats_table.add_row("Canali", str(s.channels), "Video", str(s.total_in_db))
         stats_table.add_row(
             "In coda", f"[cyan bold]{s.pending}[/]",
             "Processati", f"[green]{s.processed}[/]",
@@ -490,122 +490,70 @@ class Dashboard:
             "Errori", f"[red]{s.errored}[/]",
         )
         stats_table.add_row(
-            "Locali (DB)", f"[magenta]{s.locales_found}[/]",
-            "Visite (DB)", f"[magenta]{s.visits_created}[/]",
+            "Locali DB", f"[magenta]{s.locales_found}[/]",
+            "Visite DB", f"[magenta]{s.visits_created}[/]",
         )
         avg = s.avg_video_seconds()
         stats_table.add_row(
-            "Locali (run)", f"[magenta]{len(s.run_locales)}[/]",
+            "Locali run", f"[magenta]{len(s.run_locales)}[/]",
             "Media/video", self._fmt_time(avg) if avg else "—",
         )
-
         stats_panel = Panel(stats_table, title="[bold]Statistiche", border_style="blue", expand=True)
 
         if s.current_video_index > 0:
-            title_trunc = s.current_video_title[: cols - 30] if s.current_video_title else "—"
             video_info = Text()
-            video_info.append(
-                f"Video {s.current_video_index}/{s.total_videos}: ",
-                style="bold",
-            )
-            video_info.append(title_trunc, style="italic")
+            video_info.append(f"[{s.current_video_index}/{s.total_videos}] ", style="bold")
+            video_info.append(s.current_video_title[: cols - 20], style="italic")
+            elapsed_parts: list[str] = []
             if s.video_start_time:
-                video_info.append(
-                    f"\n  Tempo video: {self._fmt_time(time.time() - s.video_start_time)}",
-                    style="dim",
-                )
-            if s.step_start_time and s.current_step:
-                video_info.append(
-                    f"  · step «{s.current_step}»: {self._fmt_time(time.time() - s.step_start_time)}",
-                    style="dim",
-                )
-            video_info.append("\n")
-            for i, step in enumerate(PIPELINE_STEPS[2:], start=2):
-                if i < s.current_step_index:
-                    video_info.append(f" ✓ {step} ", style="green")
-                elif i == s.current_step_index:
-                    video_info.append(f" ▸ {step} ", style="bold yellow")
-                else:
-                    video_info.append(f"   {step} ", style="dim")
-                video_info.append("\n")
+                elapsed_parts.append(f"video {self._fmt_time(time.time() - s.video_start_time)}")
+            if s.current_step:
+                step_t = self._fmt_time(time.time() - s.step_start_time) if s.step_start_time else "—"
+                elapsed_parts.append(f"step «{s.current_step}» {step_t}")
+            if elapsed_parts:
+                video_info.append(f"\n  {' · '.join(elapsed_parts)}", style="dim")
+            done = " ".join(
+                f"[green]✓{st}[/]" if idx < s.current_step_index
+                else f"[bold yellow]▸{st}[/]" if idx == s.current_step_index
+                else f"[dim]{st}[/]"
+                for idx, st in enumerate(PIPELINE_STEPS[2:], start=2)
+            )
+            video_info.append(f"\n  {done}")
             video_panel = Panel(video_info, title="[bold]Video corrente", border_style="green", expand=True)
         else:
             video_panel = Panel(
                 Align.center(Text("In attesa di video…", style="dim")),
-                title="[bold]Video corrente",
-                border_style="green",
-                expand=True,
+                title="[bold]Video corrente", border_style="green", expand=True,
             )
 
-        src = s.sources
-        sources_lines = Text()
-        if src.video_id:
-            sources_lines.append("Fonti attive:\n", style="bold")
-            sources_lines.append(f"  Titolo  · tipo={src.intel_type or '?'}")
-            if src.intel_city:
-                sources_lines.append(f"  · città intel={src.intel_city}")
-            if src.description_chars:
-                sources_lines.append(f"\n  Descrizione ({src.description_chars} char)")
-            if src.chapters_count:
-                sources_lines.append(f"\n  Capitoli YouTube ({src.chapters_count})")
-            if src.description_timestamps_count:
-                sources_lines.append(
-                    f"\n  Timestamp descrizione ({src.description_timestamps_count})"
-                )
-            if src.venue_hints_count:
-                sources_lines.append(f"\n  Hint locali titolo/desc ({src.venue_hints_count})")
-            if src.comments_count:
-                sources_lines.append(f"\n  Commenti YouTube ({src.comments_count})")
-            if src.transcript_source:
-                sources_lines.append(
-                    f"\n  Trascrizione: {src.transcript_source} ({src.transcript_chars} char)"
-                )
-            flags = []
-            if src.uses_ner:
-                flags.append("GLiNER")
-            if src.uses_llm:
-                flags.append("LLM")
-            if flags:
-                sources_lines.append(f"\n  Estrazione: {', '.join(flags)}")
-            if src.food_gate:
-                sources_lines.append(f"\n  Food gate: {src.food_gate[:80]}")
-        else:
-            sources_lines.append("(nessun video in elaborazione)", style="dim")
-        sources_panel = Panel(sources_lines, title="[bold]Dati video usati", border_style="yellow", expand=True)
-
         loc_table = Table(show_header=True, header_style="bold", expand=True)
-        loc_table.add_column("Locale", ratio=3)
-        loc_table.add_column("Città", ratio=2)
+        loc_table.add_column("Locale", ratio=4)
         loc_table.add_column("Conf.", justify="right", width=6)
         loc_table.add_column("Voto", width=5)
-        loc_table.add_column("Stato", width=8)
+        loc_table.add_column("Stato", width=6)
         shown = s.current_extractions or s.run_locales[-8:]
         for h in shown[-10:]:
             conf_style = "green" if h.confidence >= 0.72 else "yellow" if h.confidence >= 0.5 else "red"
             loc_table.add_row(
-                h.name[:40],
-                (h.city or "—")[:20],
+                h.name[:55],
                 f"[{conf_style}]{h.confidence:.0%}[/]",
                 str(h.rating or "—"),
-                "[red]flag[/]" if h.flagged else "ok",
+                "[red]⚑[/]" if h.flagged else "ok",
             )
         if not shown:
-            loc_table.add_row("—", "—", "—", "—", "—")
+            loc_table.add_row("—", "—", "—", "—")
         locales_panel = Panel(
             loc_table,
             title=f"[bold]Locali ({len(s.run_locales)} in questa run)",
-            border_style="magenta",
-            expand=True,
+            border_style="magenta", expand=True,
         )
 
         progress_panel = Panel(
             self._video_progress,
-            title="[bold]Avanzamento batch",
-            border_style="cyan",
-            expand=True,
+            title="[bold]Avanzamento batch", border_style="cyan", expand=True,
         )
 
-        max_log = max(3, rows - 36)
+        max_log = max(3, rows - 28)
         s.max_log_lines = max_log
         log_text = Text()
         for line in s.log_lines[-max_log:]:
@@ -619,7 +567,6 @@ class Dashboard:
             "",
             stats_panel,
             video_panel,
-            sources_panel,
             locales_panel,
             progress_panel,
             log_panel,
