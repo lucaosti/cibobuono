@@ -269,32 +269,22 @@ def run_pipeline(
         pc.mark_started(pid=os.getpid(), max_videos=max_videos)
         dash.set_phase("Phase 1 — Catalog")
 
-        # ------------------------------------------------------------------
-        # PHASE 1: Catalog
-        # ------------------------------------------------------------------
-
-        # Step 1: Fetch channels
         dash.set_step("Fetch channels")
-        _log("Step 1: Fetching channels from channels_input.txt...")
+        _log("Fetching channels…")
         from scripts.fetch_channels import fetch_channels
         new_channels = fetch_channels()
-        _log(f"Step 1 complete: {len(new_channels)} new channels")
+        _log(f"{len(new_channels)} new channels")
         _refresh_stats()
 
-        # Step 2: Catalog ALL videos as pending (no download yet)
         if not skip_fetch:
             dash.set_step("Catalog videos")
-            _log("Step 2: Cataloging channel videos...")
+            _log("Cataloging channel videos…")
             from scripts.fetch_videos import catalog_channel_videos
             n = catalog_channel_videos()
-            _log(f"Step 2 complete: {n} new videos cataloged")
+            _log(f"{n} new videos cataloged")
             _refresh_stats()
         else:
-            _log("Step 2: Skipped (--skip-fetch)")
-
-        # ------------------------------------------------------------------
-        # PHASE 2: Process pending videos (newest first)
-        # ------------------------------------------------------------------
+            _log("Catalog skipped (--skip-fetch)")
 
         dash.set_phase("Phase 2 — Processing")
         _refresh_stats()
@@ -305,6 +295,22 @@ def run_pipeline(
             get_pending_videos,
             update_video_status,
         )
+
+        def _err(vid: str, ch: str, pub: str, step: str, recap: dict) -> None:
+            """Mark a video errored, update status/processed/dashboard."""
+            update_video_status(vid, VideoStatus.ERRORED, pub)
+            _update_processed(vid, ch, VideoStatus.ERRORED)
+            recap.update({"outcome": "errored", "step": step})
+            dash.tick_stat("errored")
+            _dash_finish("errored")
+
+        def _skip(vid: str, ch: str, pub: str, outcome: str, recap: dict) -> None:
+            """Mark a video as processed/skipped, update status/processed/dashboard."""
+            update_video_status(vid, VideoStatus.PROCESSED, pub)
+            _update_processed(vid, ch, VideoStatus.PROCESSED, 0, 0)
+            recap["outcome"] = outcome
+            dash.tick_stat("processed")
+            _dash_finish("processed")
 
         pending = get_pending_videos()
         to_process = pending if max_videos <= 0 else pending[:max_videos]
@@ -462,12 +468,7 @@ def run_pipeline(
                 audio_path = download_audio(video_id, video["url"])
                 if not audio_path:
                     _log(f"  ✗ Audio download failed for {video_id}")
-                    update_video_status(video_id, VideoStatus.ERRORED, publish_date)
-                    _update_processed(video_id, channel_id, VideoStatus.ERRORED)
-                    recap["outcome"] = "errored"
-                    recap["step"] = "download_audio"
-                    dash.tick_stat("errored")
-                    _dash_finish("errored")
+                    _err(video_id, channel_id, publish_date, "download_audio", recap)
                     continue
 
                 # Step 3.5: Metadata + video intelligence (pre-Whisper filters)
@@ -489,62 +490,28 @@ def run_pipeline(
                     video_description = intel.video_description or ""
                     comments: list = []
 
-                    if video_description:
-                        _log(f"  Video description: {len(video_description)} chars")
-
                     chapters = (youtube_extra or {}).get("chapters") or []
                     dts = (youtube_extra or {}).get("description_timestamps") or []
-                    if chapters or dts:
-                        _log(
-                            f"  YouTube extra: {len(chapters)} chapters, "
-                            f"{len(dts)} description timestamps"
-                        )
-
-                    if intel.comments_count:
-                        _log(
-                            f"  Comments: {intel.comments_count} read, "
-                            f"hints now {len(video_intel.venue_hints) if video_intel else 0}"
-                        )
-
-                    if video_intel:
-                        dash.set_video_sources(
-                            description_chars=len(video_description or ""),
-                            chapters_count=len(chapters),
-                            description_timestamps_count=len(dts),
-                            venue_hints_count=len(video_intel.venue_hints),
-                            comments_count=intel.comments_count,
-                            intel_city=video_intel.city or "",
-                            intel_type=video_intel.video_type or "",
-                            intel_series=video_intel.series_name or "",
-                            uses_ner=True,
-                            uses_llm=True,
-                        )
+                    _log(
+                        f"  Intel: type={video_intel.video_type if video_intel else '?'}"
+                        f", city={video_intel.city if video_intel else ''}"
+                        f", hints={len(video_intel.venue_hints) if video_intel else 0}"
+                        f", desc={len(video_description)} ch"
+                        f", chapters={len(chapters)}, ts={len(dts)}"
+                        f", comments={intel.comments_count}"
+                    )
 
                     # Title-based skip before Whisper
                     if video_intel and video_intel.video_type == "non_review" and video_intel.skip_reason:
-                        _log(f"  ✗ Skipped (title analysis: non-review): {video_intel.skip_reason}")
-                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
-                        recap["outcome"] = "skipped_non_review"
-                        dash.tick_stat("processed")
-                        _dash_finish("processed")
+                        _log(f"  ✗ Skipped (non-review): {video_intel.skip_reason}")
+                        _skip(video_id, channel_id, publish_date, "skipped_non_review", recap)
                         continue
-
-                    _log(
-                        f"  Intel: type={video_intel.video_type if video_intel else '?'}, "
-                        f"city={video_intel.city if video_intel else ''}, "
-                        f"hints={len(video_intel.venue_hints) if video_intel else 0}"
-                    )
 
                     # Description-based non-food skip before Whisper
                     is_nf, nf_reason = detect_non_food_video(v_title, video_description)
                     if is_nf:
-                        _log(f"  ✗ Skipped (non-food via description): {nf_reason}")
-                        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
-                        _update_processed(video_id, channel_id, VideoStatus.PROCESSED, 0, 0)
-                        recap["outcome"] = "skipped_non_food"
-                        dash.tick_stat("processed")
-                        _dash_finish("processed")
+                        _log(f"  ✗ Skipped (non-food): {nf_reason}")
+                        _skip(video_id, channel_id, publish_date, "skipped_non_food", recap)
                         continue
 
                     if not skip_extract:
@@ -572,12 +539,7 @@ def run_pipeline(
                     transcript = transcribe_audio(video_id, whisper_model)
                     if not transcript:
                         _log(f"  ✗ Transcription failed for {video_id}")
-                        update_video_status(video_id, VideoStatus.ERRORED, publish_date)
-                        _update_processed(video_id, channel_id, VideoStatus.ERRORED)
-                        recap["outcome"] = "errored"
-                        recap["step"] = "transcribe"
-                        dash.tick_stat("errored")
-                        _dash_finish("errored")
+                        _err(video_id, channel_id, publish_date, "transcribe", recap)
                         continue
                 else:
                     _log("  Transcription skipped (cached)")
@@ -587,12 +549,7 @@ def run_pipeline(
                             transcript = json.load(f)
                     else:
                         _log(f"  ✗ No cached transcript for {video_id}")
-                        update_video_status(video_id, VideoStatus.ERRORED, publish_date)
-                        _update_processed(video_id, channel_id, VideoStatus.ERRORED)
-                        recap["outcome"] = "errored"
-                        recap["step"] = "transcript_cache_missing"
-                        dash.tick_stat("errored")
-                        _dash_finish("errored")
+                        _err(video_id, channel_id, publish_date, "transcript_cache_missing", recap)
                         continue
 
                 dash.set_video_sources(
@@ -619,12 +576,7 @@ def run_pipeline(
 
                 if not chunks:
                     _log(f"  ✗ No chunks for {video_id}")
-                    update_video_status(video_id, VideoStatus.ERRORED, publish_date)
-                    _update_processed(video_id, channel_id, VideoStatus.ERRORED)
-                    recap["outcome"] = "errored"
-                    recap["step"] = "chunk"
-                    dash.tick_stat("errored")
-                    _dash_finish("errored")
+                    _err(video_id, channel_id, publish_date, "chunk", recap)
                     continue
 
                 # Step 6: Extract locales with LLM
@@ -647,16 +599,8 @@ def run_pipeline(
                             video_intel=video_intel,
                         )
                         if not is_food:
-                            _log(f"  ✗ Skipped (LLM food-check): {food_reason}")
-                            update_video_status(
-                                video_id, VideoStatus.PROCESSED, publish_date
-                            )
-                            _update_processed(
-                                video_id, channel_id, VideoStatus.PROCESSED, 0, 0
-                            )
-                            recap["outcome"] = "skipped_food_gate"
-                            dash.tick_stat("processed")
-                            _dash_finish("processed")
+                            _log(f"  ✗ Skipped (food-check): {food_reason}")
+                            _skip(video_id, channel_id, publish_date, "skipped_food_gate", recap)
                             continue
                         _log(f"  Food-check: {food_reason}")
 
@@ -1022,55 +966,29 @@ def _print_status():
     visits = load_json(VISITS_JSON)
     flagged = load_json(FLAGGED_SEGMENTS_JSON)
     skipped = load_json(SKIPPED_VIDEOS_JSON)
-    processed = load_json(PROCESSED_VIDEOS_JSON)
+    processed_log = load_json(PROCESSED_VIDEOS_JSON)
     channels = load_json(CHANNELS_JSON)
 
-    pending = [v for v in videos if v.get("status") == "pending"]
-    proc = [v for v in videos if v.get("status") == "processed"]
-    errored = [v for v in videos if v.get("status") == "errored"]
+    by_status = {s: [v for v in videos if v.get("status") == s] for s in ("pending", "processed", "errored")}
+    print(f"\n{'='*50}\n  CiboBuono Pipeline — Status\n{'='*50}")
+    print(f"  Channels: {len(channels)}  Videos: {len(videos)}"
+          f"  (pending={len(by_status['pending'])}, processed={len(by_status['processed'])}, errored={len(by_status['errored'])})")
+    print(f"  Skipped: {len(skipped)}  Locales: {len(locales)}  Visits: {len(visits)}  Flagged: {len(flagged)}\n")
 
-    print(f"\n{'='*50}")
-    print(f"  CiboBuono Pipeline — Status")
-    print(f"{'='*50}")
-    print(f"  Channels:       {len(channels)}")
-    print(f"  Total videos:   {len(videos)}")
-    print(f"    Pending:      {len(pending)}")
-    print(f"    Processed:    {len(proc)}")
-    print(f"    Errored:      {len(errored)}")
-    print(f"  Skipped:        {len(skipped)} (recipe)")
-    print(f"  Locales found:  {len(locales)}")
-    print(f"  Visits:         {len(visits)}")
-    print(f"  Flagged:        {len(flagged)}")
+    for v in by_status["processed"]:
+        pv = next((p for p in processed_log if p["video_id"] == v["video_id"]), {})
+        print(f"  [{v.get('publish_date','')}] {v['title'][:60]}  "
+              f"(visits={pv.get('visits_extracted',0)}, flagged={pv.get('flagged_segments',0)})")
+    if by_status["processed"]:
+        print()
+    for loc in locales:
+        print(f"  {loc['name']} | {loc.get('city','')} | ({loc.get('lat','')}, {loc.get('lon','')})")
+    loc_by_id = {l["locale_id"]: l["name"] for l in locales}
+    for vis in visits:
+        print(f"  {loc_by_id.get(vis['locale_id'],'?')} | {vis['sentiment']} | rating={vis['rating']} | video={vis['video_id']}")
+    for f in flagged:
+        print(f"  {f.get('locale_name','?')} | reason={f.get('reason','')} | video={f['video_id']}")
     print()
-
-    if proc:
-        print("  Processed videos:")
-        for v in proc:
-            # Find visit/flagged counts from processed_videos.json
-            pv = next((p for p in processed if p["video_id"] == v["video_id"]), {})
-            vc = pv.get("visits_extracted", 0)
-            fc = pv.get("flagged_segments", 0)
-            print(f"    [{v.get('publish_date','')}] {v['title'][:55]}  (visits={vc}, flagged={fc})")
-        print()
-
-    if locales:
-        print("  Locales:")
-        for loc in locales:
-            print(f"    {loc['name']} | {loc.get('city','')} | ({loc.get('lat','')}, {loc.get('lon','')})")
-        print()
-
-    if visits:
-        print("  Visits:")
-        for vis in visits:
-            loc_name = next((l["name"] for l in locales if l["locale_id"] == vis["locale_id"]), "?")
-            print(f"    {loc_name} | {vis['sentiment']} | rating={vis['rating']} | video={vis['video_id']}")
-        print()
-
-    if flagged:
-        print("  Flagged segments:")
-        for f in flagged:
-            print(f"    {f.get('locale_name','?')} | reason={f.get('reason','')} | video={f['video_id']}")
-        print()
 
 
 def _reset_all(reset_all_data: bool = False):
