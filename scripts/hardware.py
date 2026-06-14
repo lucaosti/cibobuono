@@ -190,7 +190,7 @@ def _detect_apple_silicon_cores() -> tuple[int, int]:
             e = 0
         return p, e
     except Exception as exc:
-        logger.debug(f"_detect_apple_silicon_cores failed: {exc}")
+        logger.debug("_detect_apple_silicon_cores failed: %s", exc)
         # Conservative fallback: half logical as performance, half as efficiency
         n = os.cpu_count() or 4
         return max(1, n // 2), max(0, n - n // 2)
@@ -232,7 +232,7 @@ def _detect_ram_gb() -> float:
                 if line.isdigit():
                     return round(int(line) / (1024**3), 2)
     except Exception as exc:
-        logger.debug(f"_detect_ram_gb fallback failed: {exc}")
+        logger.debug("_detect_ram_gb fallback failed: %s", exc)
     return 8.0  # safe default
 
 
@@ -262,7 +262,7 @@ def _detect_cuda() -> tuple[bool, str | None, float | None]:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         out = None
     except Exception as exc:
-        logger.debug(f"nvidia-smi probe failed: {exc}")
+        logger.debug("nvidia-smi probe failed: %s", exc)
         out = None
 
     if out is not None and out.returncode == 0 and out.stdout.strip():
@@ -284,10 +284,10 @@ def _detect_cuda() -> tuple[bool, str | None, float | None]:
             name = torch.cuda.get_device_name(0)
             props = torch.cuda.get_device_properties(0)
             vram_gb = round(props.total_memory / 1024 ** 3, 2)
-            logger.debug(f"CUDA detected via PyTorch: {name} ({vram_gb} GB)")
+            logger.debug("CUDA detected via PyTorch: %s (%.2f GB)", name, vram_gb)
             return True, name, vram_gb
     except Exception as exc:
-        logger.debug(f"PyTorch CUDA fallback failed: {exc}")
+        logger.debug("PyTorch CUDA fallback failed: %s", exc)
 
     return False, None, None
 
@@ -370,7 +370,7 @@ def _detect_virtualization() -> tuple[bool, str | None]:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
         except Exception as exc:
-            logger.debug(f"systemd-detect-virt failed: {exc}")
+            logger.debug("systemd-detect-virt failed: %s", exc)
 
         # 2. Docker / Podman / Kubernetes sentinel files
         if Path("/.dockerenv").exists():
@@ -561,15 +561,7 @@ def _derive_params(
         if total_ram_gb < 4:
             whisper_model = "small"
 
-    elif plat in (DevicePlatform.LINUX_X86_64, DevicePlatform.WINDOWS_CPU):
-        whisper_compute_type = "int8"
-        n_threads = max(2, cpu_count_physical - 1)
-        n_batch = 512
-        n_ctx = 4096
-        if total_ram_gb < 8:
-            whisper_model = "medium"
-
-    elif plat == DevicePlatform.MAC_INTEL:
+    elif plat in (DevicePlatform.LINUX_X86_64, DevicePlatform.WINDOWS_CPU, DevicePlatform.MAC_INTEL):
         whisper_compute_type = "int8"
         n_threads = max(2, cpu_count_physical - 1)
         n_batch = 512

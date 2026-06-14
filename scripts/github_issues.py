@@ -116,7 +116,7 @@ def list_reports(limit: int = 50, state: str = "all") -> list[dict]:
             )
         _cache[key] = (now, items)
     except Exception as e:
-        logger.warning(f"GitHub issues fetch failed: {e}")
+        logger.warning("GitHub issues fetch failed: %s", e)
         if cached:
             return cached[1][:limit]
     return items[:limit]
