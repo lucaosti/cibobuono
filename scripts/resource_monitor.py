@@ -127,135 +127,74 @@ class ResourceSnapshot:
         )
 
 
-def _gpu_memory_gb_gpustat() -> tuple[float | None, float | None, float | None]:
-    """Fallback when nvidia-smi is missing but gpustat is installed."""
+def _gpustat_json() -> list[dict]:
+    """Return gpustat JSON gpu list, or [] on any failure."""
     try:
-        out = subprocess.run(
-            ["gpustat", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None, None, None
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("gpustat memory probe failed: %s", exc)
-        return None, None, None
-
-    if out.returncode != 0 or not out.stdout.strip():
-        return None, None, None
-
-    try:
-        import json as _json
-
-        gpus = _json.loads(out.stdout).get("gpus") or []
-        if not gpus:
-            return None, None, None
-        g = gpus[0]
-        total_mb = float(g["memory.total"])
-        used_mb = float(g["memory.used"])
-    except (KeyError, TypeError, ValueError, _json.JSONDecodeError):
-        return None, None, None
-
-    total = total_mb / 1024.0
-    free = max(0.0, (total_mb - used_mb) / 1024.0)
-    used_pct = round(used_mb / total_mb * 100.0, 1) if total_mb > 0 else None
-    return round(total, 2), round(free, 2), used_pct
-
-
-def _gpu_compute_percent() -> float | None:
-    """GPU SM utilization % (same metric as nvtop / nvidia-smi utilization.gpu)."""
-    try:
-        out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return _gpu_compute_percent_gpustat()
+        import json as _j
+        out = subprocess.run(["gpustat", "--json"], capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return _j.loads(out.stdout).get("gpus") or []
     except Exception as exc:
-        logger.debug("nvidia-smi utilization probe failed: %s", exc)
-        return _gpu_compute_percent_gpustat()
-
-    if out.returncode != 0 or not out.stdout.strip():
-        return _gpu_compute_percent_gpustat()
-
-    try:
-        return round(float(out.stdout.strip().splitlines()[0].strip()), 1)
-    except ValueError:
-        return _gpu_compute_percent_gpustat()
-
-
-def _gpu_compute_percent_gpustat() -> float | None:
-    """GPU compute % via gpustat (fallback when nvidia-smi is unavailable)."""
-    try:
-        out = subprocess.run(
-            ["gpustat", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    except Exception as exc:
-        logger.debug("gpustat utilization probe failed: %s", exc)
-        return None
-
-    if out.returncode != 0 or not out.stdout.strip():
-        return None
-
-    try:
-        import json as _json
-
-        gpus = _json.loads(out.stdout).get("gpus") or []
-        if not gpus:
-            return None
-        util = gpus[0].get("utilization.gpu")
-        if util is None:
-            return None
-        return round(float(util), 1)
-    except (KeyError, TypeError, ValueError, _json.JSONDecodeError):
-        return None
+        logger.debug("gpustat probe failed: %s", exc)
+    return []
 
 
 def _gpu_memory_gb() -> tuple[float | None, float | None, float | None]:
-    """(total_gb, free_gb, used_percent) for the first CUDA GPU."""
+    """(total_gb, free_gb, used_percent) for the first CUDA GPU; nvidia-smi → gpustat fallback."""
     try:
         out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total,memory.free",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
+            ["nvidia-smi", "--query-gpu=memory.total,memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return _gpu_memory_gb_gpustat()
-    except Exception as exc:  # pragma: no cover - defensive
+        if out.returncode == 0 and out.stdout.strip():
+            parts = [p.strip() for p in out.stdout.strip().splitlines()[0].split(",")]
+            if len(parts) >= 2:
+                total = float(parts[0]) / 1024.0
+                free = float(parts[1]) / 1024.0
+                pct = round((total - free) / total * 100.0, 1) if total > 0 else None
+                return round(total, 2), round(free, 2), pct
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    except Exception as exc:
         logger.debug("nvidia-smi memory probe failed: %s", exc)
-        return _gpu_memory_gb_gpustat()
 
-    if out.returncode != 0 or not out.stdout.strip():
-        return _gpu_memory_gb_gpustat()
+    gpus = _gpustat_json()
+    if gpus:
+        try:
+            g = gpus[0]
+            total_mb, used_mb = float(g["memory.total"]), float(g["memory.used"])
+            total = total_mb / 1024.0
+            free = max(0.0, (total_mb - used_mb) / 1024.0)
+            pct = round(used_mb / total_mb * 100.0, 1) if total_mb > 0 else None
+            return round(total, 2), round(free, 2), pct
+        except (KeyError, TypeError, ValueError):
+            pass
+    return None, None, None
 
-    first = out.stdout.strip().splitlines()[0]
-    parts = [p.strip() for p in first.split(",")]
-    if len(parts) < 2:
-        return _gpu_memory_gb_gpustat()
+
+def _gpu_compute_percent() -> float | None:
+    """GPU SM utilization %; nvidia-smi → gpustat fallback."""
     try:
-        total = float(parts[0]) / 1024.0
-        free = float(parts[1]) / 1024.0
-    except ValueError:
-        return _gpu_memory_gb_gpustat()
-    used_pct = round((total - free) / total * 100.0, 1) if total > 0 else None
-    return round(total, 2), round(free, 2), used_pct
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return round(float(out.stdout.strip().splitlines()[0].strip()), 1)
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        pass
+    except Exception as exc:
+        logger.debug("nvidia-smi utilization probe failed: %s", exc)
+
+    gpus = _gpustat_json()
+    if gpus:
+        try:
+            util = gpus[0].get("utilization.gpu")
+            if util is not None:
+                return round(float(util), 1)
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
 def snapshot(*, include_gpu: bool = False) -> ResourceSnapshot:

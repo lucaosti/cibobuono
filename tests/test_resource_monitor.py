@@ -240,12 +240,16 @@ def test_apply_friendly_priority_idempotent():
 
 
 def test_gpu_compute_percent_from_gpustat(monkeypatch):
-    fake = types.SimpleNamespace(
-        returncode=0,
-        stdout='{"gpus":[{"utilization.gpu":97,"memory.total":16384,"memory.used":2400}]}',
-    )
-    monkeypatch.setattr(rm.subprocess, "run", lambda *a, **k: fake)
-    assert rm._gpu_compute_percent_gpustat() == 97.0
+    # nvidia-smi fails → gpustat JSON is parsed for compute %
+    def _fake_run(cmd, **kw):
+        if cmd[0] == "nvidia-smi":
+            return types.SimpleNamespace(returncode=1, stdout="")
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout='{"gpus":[{"utilization.gpu":97,"memory.total":16384,"memory.used":2400}]}',
+        )
+    monkeypatch.setattr(rm.subprocess, "run", _fake_run)
+    assert rm._gpu_compute_percent() == 97.0
 
 
 def test_dashboard_hardware_uses_compute_not_vram(monkeypatch):
