@@ -47,26 +47,37 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 │
 ├── scripts/                        # Pipeline modules (Python)
 │   ├── schemas.py                  # Pydantic models & validation
-│   ├── utils.py                    # Shared utilities, paths, config, legacy detect_hardware shim
+│   ├── utils.py                    # Shared utilities, paths, config, hardware shim
 │   ├── hardware.py                 # Cross-platform DeviceProfile (Whisper + llama.cpp params)
+│   ├── resource_monitor.py         # Live RAM/GPU/CPU monitoring with back-pressure
 │   ├── fetch_channels.py           # Extract channel metadata via yt-dlp
-│   ├── fetch_videos.py             # Catalog videos, detect recipes/Shorts, download audio
-│   ├── transcribe_video.py         # Transcription: Whisper large-v3-turbo (primary) + YouTube manual subs (when present)
+│   ├── fetch_videos.py             # Catalog videos, detect recipes/non-food/Shorts, download audio
+│   ├── transcribe_video.py         # Transcription: Whisper large-v3-turbo (primary) + YouTube manual subs
 │   ├── chunk_transcription.py      # Split transcripts into 90s chunks with 15s overlap
+│   ├── video_intelligence.py       # Title + description + chapters + comments analysis (hints, rating, rubrica)
 │   ├── extract_locales.py          # Shared helpers: food gate, hints, timestamps, LLM handle
-│   ├── ner_candidates.py           # GLiNER venue candidates (+ heuristic fallback)
+│   ├── ner_candidates.py           # GLiNER venue candidates (+ heuristic fallback; parallel workers)
 │   ├── visit_classifier.py         # Italian rules + LLM yes/no for ambiguous cases
-│   ├── extract_pipeline.py         # Orchestrator: NER → classify → detail LLM → cross-chunk filter
-│   ├── video_intelligence.py       # Title + description + chapters analysis (rubrica, rating, hints)
-│   ├── geocode_locales.py          # Nominatim geocoding (free, rate-limited)
+│   ├── batch_visit_llm.py          # Batch LLM evaluation for NER candidates (GPU-optimised)
+│   ├── venue_discovery.py          # Holistic LLM venue discovery from full timestamped transcript
+│   ├── extract_pipeline.py         # Orchestrator: NER → batch classify → detail LLM → cross-chunk filter → holistic merge
+│   ├── geocode_locales.py          # Nominatim geocoding (free, rate-limited, file-cached)
 │   ├── verify_locales.py           # OSM verification via Overpass API (anti-false-positive)
 │   ├── deduplicate_locales.py      # Fuzzy name + haversine distance deduplication
 │   ├── populate_json.py            # Write visits, flagged segments
-│   ├── handle_flagged_segments.py  # Import manually reviewed segments
+│   ├── handle_flagged_segments.py  # Import manually reviewed segments → locale + visit
+│   ├── manual_edits.py             # Dashboard-driven manual corrections (remove/add visits)
+│   ├── review_queue.py             # Pending-review queue + user locale reports
+│   ├── github_issues.py            # Prefilled GitHub issue URLs + cached Issues API reads
 │   ├── repair_stale_state.py       # Repair pending-but-already-extracted videos
-│   ├── dashboard.py                # Rich live terminal dashboard
+│   ├── pipeline_executor.py        # PipelineExecutor: background finalize (GPU/CPU overlap)
+│   ├── pipeline_metrics.py         # Per-run metrics aggregation → logs/pipeline_metrics.json
+│   ├── pipeline_control.py         # Runtime pause/stop/status control from dashboard
+│   ├── dashboard.py                # Rich live terminal dashboard + JSON snapshot
+│   ├── dashboard_web.py            # Lightweight web dashboard (Flask)
+│   ├── setup_models.py             # Model download + verification helper
 │   ├── push_to_github.py           # Git commit & push
-│   ├── validate_data.py            # Validate data/*.json (Pydantic; CI / local)
+│   ├── validate_data.py            # Validate data/*.json against Pydantic schemas (CI / local)
 │   ├── run_pipeline.py             # Main pipeline orchestrator (2-phase; --watch supported)
 │   └── com.cibobuono.pipeline.plist.example  # Example macOS LaunchAgent for --watch mode
 │
@@ -89,22 +100,34 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 │   │       └── StatusBar.tsx       # Loading/error states
 │   └── ...
 │
-├── tests/                          # Pytest test suite
-│   ├── test_schemas.py
-│   ├── test_dedup.py
-│   ├── test_chunks.py
-│   ├── test_extraction.py
-│   ├── test_ner_candidates.py
-│   ├── test_visit_classifier.py
-│   ├── test_extract_pipeline.py
-│   ├── test_verify.py
-│   ├── test_utils.py
-│   ├── test_data_integrity.py
+├── tests/                          # Pytest test suite (394 tests)
+│   ├── test_schemas.py             # Pydantic model validation
+│   ├── test_dedup.py               # Fuzzy dedup + haversine
+│   ├── test_chunks.py              # Chunking + timestamp helpers
+│   ├── test_extraction.py          # Food gate, LLM caching, locale validation, description hints
+│   ├── test_ner_candidates.py      # GLiNER candidates + parallel exception recovery
+│   ├── test_visit_classifier.py    # Italian rule classifier + venue name checks
+│   ├── test_batch_visit_llm.py     # Batch LLM evaluation
+│   ├── test_venue_discovery.py     # Holistic LLM discovery + transcript formatting
+│   ├── test_extract_pipeline.py    # Full NER→classify→merge pipeline
+│   ├── test_verify.py              # OSM/Overpass verification
+│   ├── test_geocode.py             # Geocoding cache logic + batch geocode
+│   ├── test_github_issues.py       # Issue URL building + API cache
+│   ├── test_validate_data.py       # validate_data.py gate (all files OK / errors reported)
+│   ├── test_utils.py               # Shared utilities
+│   ├── test_data_integrity.py      # JSON referential integrity
 │   ├── test_hardware.py            # DeviceProfile across simulated platforms
 │   ├── test_populate_json.py       # populate_visits + populate_flagged
+│   ├── test_manual_edits.py        # Dashboard manual visit corrections
 │   ├── test_repair_stale_state.py  # pending → processed repair
+│   ├── test_resource_monitor.py    # RAM/GPU/CPU monitoring
+│   ├── test_pipeline_control.py    # Pause/stop/status control
+│   ├── test_pipeline_executor.py   # City coherence, finalize, GPU/CPU overlap
+│   ├── test_pipeline_metrics.py    # Run metrics aggregation + append
+│   ├── test_review_queue.py        # Pending reviews + reports
+│   ├── test_dashboard.py           # Dashboard state + snapshot
 │   ├── test_transcribe.py          # VTT parser + Whisper backend selection
-│   ├── test_video_intelligence.py  # Title / description / chapter parsing
+│   ├── test_video_intelligence.py  # Title / description / chapter / comment parsing
 │   └── test_watch_loop.py          # --watch daemon mode
 │
 ├── models/                         # Local LLM GGUF models (gitignored)
@@ -275,6 +298,8 @@ Options:
   --status             Show pipeline status summary and exit
   --watch              Continuous mode: keep cataloging + processing new videos in a loop
   --poll-interval N    With --watch, seconds between cycles (default: 1800, min: 60)
+  --no-parallel-postprocess  Run geocode/OSM/populate synchronously (disable GPU/CPU overlap)
+  --print-hardware     Print the detected hardware profile as JSON and exit
 ```
 
 ### Continuous mode (`--watch`)
@@ -316,13 +341,19 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 - **OSM real-place verification**: After geocoding, each locale is verified against OpenStreetMap via the Overpass API (500m radius, fuzzy name match ≥ 80) — if no matching food establishment exists near the coordinates, the extraction is rejected. This is the strongest anti-false-positive measure.
 - **Sliding window**: Audio files are pre-downloaded in a window of 20. As each video is processed, the oldest is cleaned up and the next is fetched.
 - **Neuro-symbolic extraction**: GLiNER proposes spans; Italian regex/heuristics decide many cases; the LLM answers visit yes/no with a quoted evidence span only when rules are unsure (no monolithic “extract everything” prompt).
-- **Non-food video filtering**: Videos with non-food keywords in the title (boxing, gaming, fitness, etc.) are automatically skipped.
+- **Non-food video filtering**: Videos with non-food keywords in the title or description (boxing, gaming, fitness, etc.) are automatically skipped before transcription.
+- **Holistic venue discovery**: A single structured LLM pass over the full timestamped transcript (`venue_discovery.py`) finds visits that chunk-level NER missed. Results are merged with NER output, keeping the highest-confidence entry per venue name.
+- **Batch LLM evaluation**: On CUDA, NER candidates are evaluated in batches rather than one at a time, reducing per-video LLM call overhead (`batch_visit_llm.py`).
+- **GPU/CPU overlap (`PipelineExecutor`)**: Geocoding, OSM verification, deduplication, and JSON population run in a background thread while the GPU processes the next video. Configurable with `--no-parallel-postprocess`.
+- **Geographic coherence check**: After geocoding, each extraction's city is compared to the video's `video_intel.city` via fuzzy matching. Mismatches downgrade confidence rather than discard the extraction.
+- **Pipeline metrics**: Each run appends a structured JSON record to `logs/pipeline_metrics.json` with geocode/OSM/publish rates, city-mismatch rate, and confidence distribution.
+- **Live resource back-pressure**: `resource_monitor.py` samples RAM, CPU, and GPU every few seconds. If the system is under memory or compute pressure between videos, the pipeline waits briefly before starting the next one.
 - **Cross-platform hardware profiling**: `scripts/hardware.py` builds a frozen `DeviceProfile` at startup that recognises Apple Silicon (P/E cores), NVIDIA CUDA, AMD ROCm, Raspberry Pi 3/4/5, generic ARM/x86 Linux, Intel Macs, Windows CPU/CUDA, and VM/container environments. Whisper device + compute type, llama.cpp `n_threads` / `n_gpu_layers` / `n_batch` / `n_ctx`, Flash Attention + Q8_0 KV cache (Metal), and `use_mlock` are all tuned per profile. Run `python -m scripts.run_pipeline --print-hardware` to dump the detected profile as JSON.
 - **Bilingual web UI**: The React site is fully bilingual (English / Italiano). The language is auto-detected from `navigator.language`, user choice persists in `localStorage`, and an EN/IT toggle in the header lets visitors switch on the fly.
 - **Graceful LLM degradation**: On very low-RAM hardware (Raspberry Pi 3, Pi Zero 2W, or <1.5 GB containers), the pipeline automatically runs in NER+rules-only mode instead of crashing.
 - **Shorts filtering**: YouTube Shorts (URL `/shorts/` or duration ≤60s) are automatically skipped.
 - **Recipe filtering**: Videos with recipe keywords in the title are automatically skipped.
-- **Global model caching**: Whisper, NER, and LLM models are loaded once per session (NER via `transformers`/`gliner`).
+- **Global model caching**: Whisper, NER, and LLM models are loaded once per session (NER via `transformers`/`gliner`). On low-end hardware GLiNER is pinned to CPU to leave VRAM for Whisper and the LLM.
 
 ## Tech Stack (100% Open Source, No Paid APIs)
 
@@ -572,24 +603,35 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 │
 ├── scripts/                        # Moduli della pipeline (Python)
 │   ├── schemas.py                  # Modelli Pydantic e validazione
-│   ├── utils.py                    # Utilità condivise, percorsi, config, shim detect_hardware
+│   ├── utils.py                    # Utilità condivise, percorsi, config, shim hardware
 │   ├── hardware.py                 # DeviceProfile cross-platform (parametri Whisper + llama.cpp)
+│   ├── resource_monitor.py         # Monitoraggio live RAM/GPU/CPU con back-pressure
 │   ├── fetch_channels.py           # Estrazione metadati canali via yt-dlp
-│   ├── fetch_videos.py             # Catalogo video, detection ricette/Shorts, download audio
-│   ├── transcribe_video.py         # Trascrizione: Whisper large-v3-turbo (primario) + sottotitoli YouTube manuali quando presenti
+│   ├── fetch_videos.py             # Catalogo video, detection ricette/non-food/Shorts, download audio
+│   ├── transcribe_video.py         # Trascrizione: Whisper large-v3-turbo (primario) + sottotitoli YouTube manuali
 │   ├── chunk_transcription.py      # Divisione trascrizioni in chunk da 90s con 15s overlap
+│   ├── video_intelligence.py       # Analisi titolo + descrizione + capitoli + commenti (hint, voto, rubrica)
 │   ├── extract_locales.py          # Helper condivisi: gate food, hints, timestamp, handle LLM
-│   ├── ner_candidates.py           # Candidati GLiNER (+ fallback euristico)
+│   ├── ner_candidates.py           # Candidati GLiNER (+ fallback euristico; worker paralleli)
 │   ├── visit_classifier.py         # Regole italiane + LLM sì/no se ambiguo
-│   ├── extract_pipeline.py         # Orchestratore: NER → classificazione → LLM dettagli → filtro cross-chunk
-│   ├── video_intelligence.py       # Analisi titolo + descrizione + capitoli (rubrica, voto, hint)
-│   ├── geocode_locales.py          # Geocoding Nominatim (gratuito, rate-limited)
+│   ├── batch_visit_llm.py          # Valutazione LLM in batch dei candidati NER (ottimizzato GPU)
+│   ├── venue_discovery.py          # Discovery olistica LLM su trascrizione completa con timestamp
+│   ├── extract_pipeline.py         # Orchestratore: NER → batch classify → LLM dettagli → filtro cross-chunk → merge olistico
+│   ├── geocode_locales.py          # Geocoding Nominatim (gratuito, rate-limited, cache su file)
 │   ├── verify_locales.py           # Verifica OSM via Overpass API (anti-falsi positivi)
 │   ├── deduplicate_locales.py      # Deduplicazione fuzzy nome + distanza haversine
 │   ├── populate_json.py            # Scrittura visite e segmenti flaggati
-│   ├── handle_flagged_segments.py  # Importazione segmenti revisionati manualmente
+│   ├── handle_flagged_segments.py  # Importazione segmenti revisionati manualmente → locale + visita
+│   ├── manual_edits.py             # Correzioni manuali dalla dashboard (rimozione/aggiunta visite)
+│   ├── review_queue.py             # Coda revisioni in attesa + segnalazioni utente
+│   ├── github_issues.py            # URL issue GitHub precompilati + lettura API Issues in cache
 │   ├── repair_stale_state.py       # Ripara video pending già estratti
-│   ├── dashboard.py                # Dashboard live nel terminale (Rich)
+│   ├── pipeline_executor.py        # PipelineExecutor: finalize in background (overlap GPU/CPU)
+│   ├── pipeline_metrics.py         # Aggregazione metriche per run → logs/pipeline_metrics.json
+│   ├── pipeline_control.py         # Controllo pause/stop/stato dalla dashboard
+│   ├── dashboard.py                # Dashboard live nel terminale (Rich) + snapshot JSON
+│   ├── dashboard_web.py            # Dashboard web leggera (Flask)
+│   ├── setup_models.py             # Helper per download e verifica modelli
 │   ├── push_to_github.py           # Commit e push su Git
 │   ├── validate_data.py            # Validazione data/*.json vs Pydantic (CI / locale)
 │   ├── run_pipeline.py             # Orchestratore principale della pipeline (2 fasi; supporta --watch)
@@ -614,22 +656,34 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 │   │       └── StatusBar.tsx       # Stati di caricamento/errore
 │   └── ...
 │
-├── tests/                          # Suite di test (pytest)
-│   ├── test_schemas.py
-│   ├── test_dedup.py
-│   ├── test_chunks.py
-│   ├── test_extraction.py
-│   ├── test_ner_candidates.py
-│   ├── test_visit_classifier.py
-│   ├── test_extract_pipeline.py
-│   ├── test_verify.py
-│   ├── test_utils.py
-│   ├── test_data_integrity.py
+├── tests/                          # Suite di test pytest (394 test)
+│   ├── test_schemas.py             # Validazione modelli Pydantic
+│   ├── test_dedup.py               # Dedup fuzzy + haversine
+│   ├── test_chunks.py              # Chunking + helper timestamp
+│   ├── test_extraction.py          # Gate food, caching LLM, validazione locale, hint descrizione
+│   ├── test_ner_candidates.py      # Candidati GLiNER + recovery eccezioni parallele
+│   ├── test_visit_classifier.py    # Classificatore regole italiane + controlli nome locale
+│   ├── test_batch_visit_llm.py     # Valutazione LLM in batch
+│   ├── test_venue_discovery.py     # Discovery olistica LLM + formattazione trascrizione
+│   ├── test_extract_pipeline.py    # Pipeline completa NER→classify→merge
+│   ├── test_verify.py              # Verifica OSM/Overpass
+│   ├── test_geocode.py             # Logica cache geocoding + batch geocode
+│   ├── test_github_issues.py       # Costruzione URL issue + cache API
+│   ├── test_validate_data.py       # Gate validate_data.py (tutti OK / errori riportati)
+│   ├── test_utils.py               # Utilità condivise
+│   ├── test_data_integrity.py      # Integrità referenziale JSON
 │   ├── test_hardware.py            # DeviceProfile su piattaforme simulate
 │   ├── test_populate_json.py       # populate_visits + populate_flagged
+│   ├── test_manual_edits.py        # Correzioni manuali visite dalla dashboard
 │   ├── test_repair_stale_state.py  # Riparazione pending → processed
+│   ├── test_resource_monitor.py    # Monitoraggio RAM/GPU/CPU
+│   ├── test_pipeline_control.py    # Controllo pause/stop/stato
+│   ├── test_pipeline_executor.py   # Coerenza geografica, finalize, overlap GPU/CPU
+│   ├── test_pipeline_metrics.py    # Aggregazione metriche run + append
+│   ├── test_review_queue.py        # Revisioni in attesa + segnalazioni
+│   ├── test_dashboard.py           # Stato dashboard + snapshot
 │   ├── test_transcribe.py          # Parser VTT + selezione backend Whisper
-│   ├── test_video_intelligence.py  # Analisi titolo/descrizione/capitoli
+│   ├── test_video_intelligence.py  # Analisi titolo/descrizione/capitoli/commenti
 │   └── test_watch_loop.py          # Modalità --watch (daemon)
 │
 ├── models/                         # Modelli LLM GGUF (gitignored)
@@ -800,6 +854,8 @@ Opzioni:
   --status             Mostra il riepilogo dello stato e termina
   --watch              Modalità continua: cataloga + processa nuovi video in loop
   --poll-interval N    Con --watch, secondi tra un ciclo e l'altro (default: 1800, min: 60)
+  --no-parallel-postprocess  Geocoding/OSM/popolamento sincrono (disabilita overlap GPU/CPU)
+  --print-hardware     Stampa il profilo hardware rilevato come JSON ed esce
 ```
 
 ### Modalità continua (`--watch`)
@@ -841,13 +897,19 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 - **Verifica OSM dei locali reali**: Dopo il geocoding, ogni locale viene verificato su OpenStreetMap tramite Overpass API (raggio 500m, fuzzy name match ≥ 80) — se nessun locale di ristorazione corrispondente esiste vicino alle coordinate, l'estrazione viene rifiutata. È la misura anti-falsi-positivi più potente.
 - **Finestra mobile**: I file audio vengono pre-scaricati in una finestra di 20. Man mano che un video viene processato, il più vecchio viene cancellato e il prossimo viene scaricato.
 - **Estrazione neuro-simbolica**: GLiNER propone gli span; regex/euristiche italiane decidono molti casi; l’LLM risponde sì/no visita con uno span di evidenza citato solo se le regole sono incerte (niente prompt monolitico “estrai tutto”).
-- **Filtro video non-food**: I video con keyword non-food nel titolo (boxing, gaming, fitness, ecc.) vengono automaticamente saltati.
+- **Filtro video non-food**: I video con keyword non-food nel titolo o descrizione (boxing, gaming, fitness, ecc.) vengono automaticamente saltati prima della trascrizione.
+- **Holistic venue discovery**: Un singolo passaggio LLM strutturato sull'intera trascrizione con timestamp (`venue_discovery.py`) trova visite che il NER a chunk ha mancato. I risultati vengono uniti all'output NER mantenendo la voce a confidenza più alta per ogni nome.
+- **Batch LLM evaluation**: Su CUDA, i candidati NER vengono valutati in batch invece che uno alla volta, riducendo il numero di chiamate LLM per video (`batch_visit_llm.py`).
+- **Overlap GPU/CPU (`PipelineExecutor`)**: Geocoding, verifica OSM, deduplicazione e scrittura JSON girano in un thread in background mentre la GPU processa il video successivo. Configurabile con `--no-parallel-postprocess`.
+- **Coerenza geografica**: Dopo il geocoding, la città di ogni estrazione viene confrontata con la `video_intel.city` via fuzzy matching. Le discrepanze abbassano la confidenza invece di scartare l'estrazione.
+- **Pipeline metrics**: Ogni run aggiunge un record JSON strutturato a `logs/pipeline_metrics.json` con tassi geocoding/OSM/pubblicazione, tasso city-mismatch e distribuzione delle confidenze.
+- **Back-pressure risorse**: `resource_monitor.py` campiona RAM, CPU e GPU ogni pochi secondi. Se il sistema è sotto pressione tra un video e l'altro, la pipeline attende brevemente prima di iniziare il prossimo.
 - **Profiling hardware cross-platform**: `scripts/hardware.py` costruisce all'avvio un `DeviceProfile` immutabile che riconosce Apple Silicon (core P/E), NVIDIA CUDA, AMD ROCm, Raspberry Pi 3/4/5, ARM/x86 Linux generico, Intel Mac, Windows CPU/CUDA e ambienti VM/container. Device + compute type di Whisper, `n_threads` / `n_gpu_layers` / `n_batch` / `n_ctx` di llama.cpp, Flash Attention + KV cache Q8_0 (Metal) e `use_mlock` sono tarati per profilo. `python -m scripts.run_pipeline --print-hardware` stampa il profilo in JSON.
 - **Sito web bilingue**: La web app React è completamente bilingue (Italiano / English). La lingua viene rilevata automaticamente da `navigator.language`, la scelta persiste in `localStorage` e un toggle IT/EN nell'header permette di cambiarla al volo.
 - **Degradazione LLM graceful**: Su hardware con pochissima RAM (Raspberry Pi 3, Pi Zero 2W, container <1.5 GB) la pipeline parte automaticamente in modalità solo NER+regole invece di crashare.
 - **Filtro Shorts**: Gli YouTube Shorts (URL `/shorts/` o durata ≤60s) vengono automaticamente saltati.
 - **Filtro ricette**: I video con parole chiave di ricette nel titolo vengono automaticamente saltati.
-- **Caching globale dei modelli**: Whisper, NER e LLM vengono caricati una sola volta per sessione (NER via `transformers`/`gliner`).
+- **Caching globale dei modelli**: Whisper, NER e LLM vengono caricati una sola volta per sessione (NER via `transformers`/`gliner`). Sull'hardware con CUDA, GLiNER è fissato su CPU per liberare VRAM per Whisper e l'LLM.
 
 ## Stack Tecnologico (100% Open Source, Nessuna API a Pagamento)
 
