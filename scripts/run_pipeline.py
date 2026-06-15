@@ -642,7 +642,7 @@ def run_pipeline(
                                     f"vs extraction={e.get('rating')} ({e.get('locale_name')})"
                                 )
                                 fe = dict(e)
-                                fe["_flag_reason"] = "rating_mismatch_title"
+                                fe["_flag_reason"] = "rating_title_transcript_mismatch"
                                 fe["confidence"] = min(float(e.get("confidence", 0.5)), 0.55)
                                 flagged_extractions.append(fe)
 
@@ -778,7 +778,7 @@ def run_pipeline(
                 json.dump(run_report, rf, ensure_ascii=False, indent=2)
             _log(f"Run report written to {report_path}")
         except OSError as e:
-            logger.warning(f"Could not write run report: {e}")
+            logger.warning("Could not write run report: %s", e)
 
         # Final cache cleanup
         deleted = cleanup_cache(PREFETCH_WINDOW)
@@ -855,13 +855,13 @@ def _data_dir_has_uncommitted_changes() -> bool:
             timeout=30,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"git status check failed ({e}); assuming changes exist")
+        logger.warning("git status check failed (%s); assuming changes exist", e)
         return True
 
     if result.returncode != 0:
         logger.warning(
-            f"git status returned {result.returncode}; assuming changes exist. "
-            f"stderr={result.stderr[:200]}"
+            "git status returned %d; assuming changes exist. stderr=%s",
+            result.returncode, result.stderr[:200],
         )
         return True
 
@@ -933,7 +933,7 @@ def run_pipeline_watch(
     try:
         while not _pipeline_shutdown["graceful"]:
             cycle_n += 1
-            logger.info(f"── Watch cycle #{cycle_n} starting ──")
+            logger.info("── Watch cycle #%d starting ──", cycle_n)
             cycle_started_at = datetime.now(timezone.utc)
 
             try:
@@ -961,7 +961,7 @@ def run_pipeline_watch(
             if _pipeline_shutdown["graceful"]:
                 break
 
-            logger.info(f"Sleeping {poll_interval:.0f}s before next cycle...")
+            logger.info("Sleeping %.0fs before next cycle...", poll_interval)
             _interruptible_sleep(poll_interval)
 
         logger.info(f"Watch mode stopped after {cycle_n} cycle(s)")
