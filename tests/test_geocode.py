@@ -188,3 +188,35 @@ class TestGeocodeExtractions:
         extractions = [{"locale_name": "Da Remo", "city": "Roma", "address": "Via Paola 45"}]
         geocoded, _ = gl.geocode_extractions(extractions)
         assert geocoded[0]["address"] == "Via Paola 45"
+
+
+class TestCleanCity:
+    def test_known_city_returned_as_is(self):
+        from scripts.geocode_locales import _clean_city
+        assert _clean_city("Roma") == "Roma"
+        assert _clean_city("Milano") == "Milano"
+
+    def test_case_insensitive_match(self):
+        from scripts.geocode_locales import _clean_city
+        assert _clean_city("roma") == "Roma"
+        assert _clean_city("NAPOLI") == "Napoli"
+
+    def test_noisy_string_extracts_neighborhood(self):
+        from scripts.geocode_locales import _clean_city
+        # "Forni criminali nuova HIT a CENTOCELLE" → analyze_title gives city="CENTOCELLE"
+        # _clean_city maps Roman neighborhood → "Roma"
+        assert _clean_city("CENTOCELLE") == "Roma"
+        assert _clean_city("Centocelle") == "Roma"
+
+    def test_noisy_string_with_known_city_substring(self):
+        from scripts.geocode_locales import _clean_city
+        assert _clean_city("nuova HIT a CENTOCELLE") == "Roma"
+
+    def test_empty_string_returns_empty(self):
+        from scripts.geocode_locales import _clean_city
+        assert _clean_city("") == ""
+
+    def test_unknown_city_extracts_last_proper_word(self):
+        from scripts.geocode_locales import _clean_city
+        result = _clean_city("qualche parola Corato")
+        assert result == "Corato"

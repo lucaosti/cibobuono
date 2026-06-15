@@ -59,7 +59,7 @@ DEDUP_NAME_SIMILARITY_THRESHOLD = 70  # thefuzz score 0-100
 #   Primary:  Qwen2.5-72B-Instruct-Q4_K_M.gguf   (~43 GB, best open multilingual)
 #   Alt:      Llama-3.3-70B-Instruct-Q4_K_M.gguf (~40 GB)
 LLM_MODEL_FILENAME = "Qwen2.5-32B-Instruct-Q4_K_M.gguf"
-LLM_CONTEXT_SIZE = 8192
+LLM_CONTEXT_SIZE = 16384
 LLM_MAX_TOKENS = 512
 LLM_TEMPERATURE = 0.1
 

@@ -153,6 +153,7 @@ class TestLinuxCUDA:
         assert p.use_mlock is True
         assert p.enable_llm is True
         assert p.llm_tier == "72B"
+        assert p.n_ctx == 16384  # VRAM ≥ 12 GB → large context
 
     def test_small_vram_uses_int8_float16(self, monkeypatch):
         _force_platform(
@@ -171,6 +172,7 @@ class TestLinuxCUDA:
 
         assert p.whisper_device == "cuda"
         assert p.whisper_compute_type == "int8_float16"
+        assert p.n_ctx == 8192  # VRAM < 12 GB → conservative context
 
 
 # ---------------------------------------------------------------------------

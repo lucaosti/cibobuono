@@ -179,6 +179,18 @@ def download_ner() -> None:
     logger.info("NER model cached (Hugging Face hub cache)")
 
 
+def download_title_classifier() -> None:
+    """Warm the zero-shot video title classifier (xlm-roberta-large-xnli)."""
+    from scripts.fetch_videos import _ZSC_MODEL_NAME
+    logger.info("Warming title classifier: %s", _ZSC_MODEL_NAME)
+    try:
+        from transformers import pipeline
+    except ImportError as exc:
+        raise SystemExit("transformers not installed. pip install transformers") from exc
+    pipeline("zero-shot-classification", model=_ZSC_MODEL_NAME, device=-1)
+    logger.info("Title classifier cached (%s)", _ZSC_MODEL_NAME)
+
+
 def verify_assets(*, models_dir: Path = MODELS_DIR) -> list[str]:
     """Return list of missing/problem descriptions (empty = OK)."""
     issues: list[str] = []
@@ -215,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--whisper-only", action="store_true")
     parser.add_argument("--ner-only", action="store_true")
     parser.add_argument("--llm-only", action="store_true")
+    parser.add_argument("--classifier-only", action="store_true", help="Download only the title classifier")
     parser.add_argument("--force-llm", action="store_true", help="Re-download GGUF even if present")
     parser.add_argument("--verify", action="store_true", help="Check assets only, no downloads")
     parser.add_argument("--whisper-model", default=WHISPER_DEFAULT_MODEL)
@@ -242,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("All model assets present.")
         return 0
 
-    only_flags = sum([args.whisper_only, args.ner_only, args.llm_only])
+    only_flags = sum([args.whisper_only, args.ner_only, args.llm_only, args.classifier_only])
     do_all = only_flags == 0
 
     if args.force_llm:
@@ -256,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
         download_whisper(args.whisper_model)
     if do_all or args.ner_only:
         download_ner()
+    if do_all or args.classifier_only:
+        download_title_classifier()
 
     issues = verify_assets()
     if issues:

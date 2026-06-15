@@ -517,7 +517,9 @@ def _derive_params(
         n_threads = max(2, cpu_count_physical - 1)
         n_gpu_layers = -1
         n_batch = 2048
-        n_ctx = 8192
+        # With flash attention + Q8_0 KV cache, 16384 context on a 14B model
+        # costs ~1.3 GB VRAM. Require ≥12 GB so 8 GB cards keep the safe 8192.
+        n_ctx = 16384 if (gpu_vram_gb is not None and gpu_vram_gb >= 12) else 8192
         use_mlock = not is_virtual
         if gpu_vram_gb is not None and gpu_vram_gb < 4:
             whisper_model = "medium"

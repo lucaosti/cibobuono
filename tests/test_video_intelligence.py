@@ -60,6 +60,25 @@ class TestAnalyzeTitleForni:
         assert intel.series_name == "Forni criminali"
         assert intel.city == "Roma"
 
+    def test_bakery_tour_nuova_hit_format(self):
+        """Franchino titles like 'Forni criminali nuova HIT a CENTOCELLE'."""
+        intel = analyze_title("Forni criminali nuova HIT a CENTOCELLE")
+        assert intel.video_type == "multi_venue_tour"
+        assert intel.series_name == "Forni criminali"
+        assert intel.city == "CENTOCELLE"
+
+    def test_pizza_taglio_criminale_extracts_venue_hint(self):
+        """'Pizza a taglio criminale VENUE' → venue hint from title."""
+        intel = analyze_title("Pizza a taglio criminale COLLE DEL SOLE")
+        assert intel.video_type == "single_venue"
+        assert intel.series_name == "Pizza a taglio criminale"
+        assert any("COLLE DEL SOLE" in h["name"] for h in intel.venue_hints)
+
+    def test_pizza_taglio_criminale_regina_margherita(self):
+        intel = analyze_title("Pizza a taglio criminale REGINA MARGHERITA")
+        assert intel.video_type == "single_venue"
+        assert any("REGINA MARGHERITA" in h["name"] for h in intel.venue_hints)
+
 
 class TestAnalyzeTitleCosaMangia:
     def test_eating_with_format(self):

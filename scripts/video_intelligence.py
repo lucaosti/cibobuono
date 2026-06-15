@@ -51,9 +51,21 @@ _CITY_CRIMINALE = re.compile(
     re.IGNORECASE,
 )
 
-# "Forni criminali {CITY}" → bakery tour
+# "Forni criminali [nuova HIT] a CITY" → bakery tour
+# Handles both "Forni criminali Roma" and "Forni criminali nuova HIT a Centocelle"
 _FORNI_CRIMINALI = re.compile(
-    r"Forni\s+criminali\s+([A-ZÀ-Ú][A-ZÀ-Úa-zà-ú\s]+?)(?:\s+da\s+\w+)?$",
+    r"Forni\s+criminali(?:\s+\S+)*?\s+a\s+([A-ZÀ-Úa-zà-ú][A-ZÀ-Úa-zà-ú\s]+?)(?:\s+da\s+\w+)?$",
+    re.IGNORECASE,
+)
+# Fallback: plain "Forni criminali CITY" (no preposition "a")
+_FORNI_CRIMINALI_PLAIN = re.compile(
+    r"Forni\s+criminali\s+([A-ZÀ-Ú][a-zà-ú]+(?:\s+[A-ZÀ-Ú][a-zà-ú]+)*)$",
+    re.IGNORECASE,
+)
+
+# "Pizza a taglio criminale VENUE" → single-venue episode (no city in title)
+_PIZZA_TAGLIO_CRIMINALE = re.compile(
+    r"Pizza\s+a\s+taglio\s+criminale\s+(.+)$",
     re.IGNORECASE,
 )
 
@@ -124,14 +136,24 @@ def analyze_title(title: str) -> VideoIntel:
         logger.info(f"Title → single venue: '{venue_name}' in {city} (Hit di Franchino)")
         return intel
 
-    # "Forni criminali CITY"
-    m = _FORNI_CRIMINALI.search(title)
+    # "Forni criminali [nuova HIT] a CITY"
+    m = _FORNI_CRIMINALI.search(title) or _FORNI_CRIMINALI_PLAIN.search(title)
     if m:
         city = m.group(1).strip()
         intel.video_type = "multi_venue_tour"
         intel.series_name = "Forni criminali"
         intel.city = city
         logger.info(f"Title → bakery tour of {city} (Forni criminali)")
+        return intel
+
+    # "Pizza a taglio criminale VENUE" — single venue, city unknown from title
+    m = _PIZZA_TAGLIO_CRIMINALE.match(title)
+    if m:
+        venue_name = m.group(1).strip()
+        intel.video_type = "single_venue"
+        intel.series_name = "Pizza a taglio criminale"
+        intel.venue_hints = [{"name": venue_name, "source": "title", "confidence": "high"}]
+        logger.info(f"Title → pizza al taglio venue: '{venue_name}'")
         return intel
 
     # "CITY criminale"

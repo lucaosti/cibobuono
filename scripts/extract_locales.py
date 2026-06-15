@@ -179,11 +179,11 @@ def _load_llm_impl():
         "verbose": False,
     }
 
-    # Flash Attention + quantized KV cache are well-tested on the Metal
-    # backend; on CUDA they're also supported but more recent. Limit to Metal
-    # for now to avoid surprises on older NVIDIA drivers.
+    # Flash Attention + Q8_0 quantized KV cache: supported on both Metal and
+    # CUDA backends. Q8_0 KV halves cache memory (~1.3 GB for 14B at 16384
+    # context vs ~2.6 GB fp16), enabling the larger context window.
     extra_kwargs: dict = {}
-    if profile.has_metal:
+    if profile.has_metal or profile.has_cuda:
         extra_kwargs["flash_attn"] = True
         try:
             from llama_cpp import GGML_TYPE_Q8_0
@@ -192,13 +192,14 @@ def _load_llm_impl():
         except ImportError:
             pass
 
+    backend_label = "Metal" if profile.has_metal else "CUDA" if profile.has_cuda else ""
     if extra_kwargs:
         try:
             instance = Llama(**llm_kwargs, **extra_kwargs)
-            logger.info("LLM loaded with flash attention + quantized KV cache (Metal)")
+            logger.info("LLM loaded with flash attention + quantized KV cache (%s)", backend_label)
         except TypeError:
             instance = Llama(**llm_kwargs)
-            logger.info("LLM loaded (advanced features not supported in this version)")
+            logger.info("LLM loaded (flash attention not supported in this llama-cpp-python build)")
     else:
         instance = Llama(**llm_kwargs)
         logger.info("LLM loaded successfully")

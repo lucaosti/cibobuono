@@ -20,7 +20,7 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 
 > **Local preview**: `cd site && npm install && npm run dev`
 
-> **Python venv (pipeline)**: from repo root, `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`, then run `python -m scripts.run_pipeline ...`. Optional: `CIBOBUONO_LLM_MODEL` → a `.gguf` under `models/` or elsewhere; `CIBOBUONO_NER_MODEL` overrides the Hugging Face id for GLiNER (default `urchade/gliner_multi-v2.1`). **PyTorch** is required for NER (CPU or MPS on Apple Silicon); if GLiNER cannot load, a lightweight heuristic fallback still runs.
+> **Python venv (pipeline)**: from repo root, `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`, then run `python -m scripts.run_pipeline ...`. Optional: `CIBOBUONO_LLM_MODEL` → a `.gguf` under `models/` or elsewhere; `CIBOBUONO_NER_MODEL` overrides the Hugging Face id for GLiNER (default `knowledgator/gliner-x-large-v0.5`). **PyTorch** is required for NER (CPU or MPS on Apple Silicon); if GLiNER cannot load, a lightweight heuristic fallback still runs.
 
 > **ffmpeg**: required on your `PATH` for yt-dlp audio extraction and for Whisper (`brew install ffmpeg` on macOS).
 
@@ -277,6 +277,72 @@ The pipeline runs in two phases:
 | 13 | Push                 | git                          | Commit & push updated data                       |
 | 14 | Deploy               | GitHub Actions                | Build React site, deploy to Pages                |
 
+### Extraction — Neuro-Symbolic Detail
+
+The extraction step (step 6 above) combines three layers working together:
+
+```
+Full timestamped transcript
+     │
+     ├─→ [A] Holistic LLM discovery  ──────────────────────────────────→ venue list + timestamps
+     │         (venue_discovery.py)                                               │
+     │                                                                            ↓
+     └─→ [B] 90 s chunks (15 s overlap)                          [C] Merge + cross-chunk filter
+               │                                                                  │
+               ├─→ GLiNER NER (parallel, 4 workers)                              ↓
+               │   knowledgator/gliner-x-large-v0.5            Final extractions with
+               │   19 zero-shot labels:                         rating + sentiment + timestamp
+               │   Venue: restaurant · ristorante · pizzeria
+               │          trattoria · forno · panificio
+               │          pasticceria · gelateria · osteria
+               │          bakery · street food stall
+               │          food market · bar or cafe
+               │   Context: city · neighborhood · country
+               │            person · brand · food dish
+               │
+               └─→ Visit classifier ──→ confirmed visits ──→ Batch LLM detail
+                   (visit_classifier.py)                     (batch_visit_llm.py)
+                   Italian rules first:                      rating: "8" / "8--" / "6++"
+                   • explicit visit verbs                    sentiment: positive/neutral/negative
+                   • movement prepositions
+                   LLM binary yes/no only if ambiguous
+                   (must cite a verbatim evidence span)
+```
+
+**[A] Holistic LLM discovery** (`venue_discovery.py`): The full timestamped transcript is sent to the LLM in a single structured-JSON prompt. The LLM returns a list of visited venues with approximate start timestamps and any stated rating or sentiment. This large-context pass catches venues that chunk-level NER misses (e.g. a place briefly mentioned at the opening and revisited later).
+
+**[B] GLiNER NER** (`ner_candidates.py`): Each 90-second chunk is scored independently by GLiNER x-large, a zero-shot generative NER model (mT5 backbone, multilingual), running in parallel across 4 CPU workers. On CUDA systems GLiNER is pinned to CPU by default to leave all VRAM for Whisper and the LLM. Set `CIBOBUONO_GLINER_CPU=0` to enable GPU inference if your free VRAM allows it (GLiNER x-large is ~1.5 GB on GPU; on machines with ≥16 GB VRAM and a 14B LLM there is ample headroom, making NER 10–20× faster).
+
+**Visit classifier** (`visit_classifier.py`): Deterministic Italian regex rules decide the majority of cases (explicit visit verbs, movement prepositions, presence in the video location). The LLM is called only for genuinely ambiguous candidates and must return a strict binary yes/no with a verbatim quoted evidence span.
+
+**Batch LLM evaluation** (`batch_visit_llm.py`): All NER candidates confirmed as visits are sent to the LLM in a single batched call that extracts `rating` and `sentiment` for every visit at once. On CPU-only systems this falls back to sequential calls.
+
+**Chunk parameters**: 90 s with 15-second overlap was chosen to balance two needs: a typical restaurant visit in these videos spans 60–180 s of commentary (so 90 s is a good fit), and the overlap prevents a mention straddling a boundary from being missed.
+
+**Rating format**: The `rating` field stores the blogger's exact expressed score as a string:
+
+| Format | Meaning |
+|--------|---------|
+| `"8"` | Exact integer score (most common) |
+| `"8--"` | Slightly below 8 (`"quasi un 8 meno meno"`) |
+| `"8-"` | A little below 8 |
+| `"7+"` | A little above 7 |
+| `"7++"` | Approaching 8 |
+| `null` | No numeric score stated; sentiment is still extracted |
+
+The numeric core must be 1–10; the Pydantic validator rejects values outside this range.
+
+**Whisper `initial_prompt`**: Every transcription is primed with a short Italian preamble listing venue types (`pizzeria`, `trattoria`, `forno`, …), well-known restaurant names, Italian cities, and visit phrases (`andiamo a mangiare`, `entriamo`, …). This significantly reduces ASR errors on restaurant proper nouns compared to unprompted decoding.
+
+**Model choices rationale**:
+
+| Component | Model | Why |
+|-----------|-------|-----|
+| ASR | `whisper-large-v3-turbo` (faster-whisper, CUDA fp16) | Best speed/accuracy ratio for Italian; full `large-v3` is ~2× slower for marginal gain |
+| NER | `knowledgator/gliner-x-large-v0.5` | Largest available zero-shot NER; mT5 backbone handles Italian venue names well with no fine-tuning |
+| LLM | `Qwen2.5-14B-Instruct-Q4_K_M.gguf` | Fully CUDA-offloadable at 8.4 GB; strong Italian instruction following and structured-JSON output; tier-27B default (`gemma-3-27b`) requires HF auth |
+| Geocoding | Nominatim + Overpass (OSM) | No paid API; Nominatim covers Italian cities well; Overpass `amenity=*` verification is the strongest anti-false-positive gate |
+
 ### Pipeline Options
 
 ```
@@ -429,8 +495,9 @@ pip install -r requirements.txt
 mkdir -p models
 # Recommended (auto-selected by RAM in this order):
 #   ≥40 GB → Qwen2.5-72B-Instruct-Q4_K_M.gguf  or  Llama-3.3-70B-Instruct-Q4_K_M.gguf
-#   ≥24 GB → Qwen2.5-32B-Instruct-Q4_K_M.gguf  or  gemma-3-27b-it-Q4_K_M.gguf
-#   ≥12 GB → Velvet-14B-Q4_K_M.gguf            (Italian-focused)
+#   ≥24 GB → Qwen2.5-32B-Instruct-Q4_K_M.gguf
+#            gemma-3-27b-it-Q4_K_M.gguf         (requires HF login: huggingface-cli login)
+#   ≥12 GB → Qwen2.5-14B-Instruct-Q4_K_M.gguf  (strong Italian, full CUDA offload ≤16 GB VRAM)
 #   ≥6  GB → Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 #   ≥3  GB → Phi-3-mini-4k-Instruct-Q4_K_M.gguf  or  Qwen2.5-3B-Instruct-Q4_K_M.gguf
 #   ≥1.5GB → tinyllama-1.1b-chat-v1.0-Q4_K_M.gguf  (Raspberry Pi 4)
@@ -576,7 +643,7 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 
 > **Anteprima locale**: `cd site && npm install && npm run dev`
 
-> **Venv Python (pipeline)**: dalla root, `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`, poi `python -m scripts.run_pipeline ...`. Opzionale: `CIBOBUONO_LLM_MODEL` → `.gguf`; `CIBOBUONO_NER_MODEL` sovrascrive l’id Hugging Face di GLiNER (default `urchade/gliner_multi-v2.1`). **PyTorch** serve per il NER (CPU o MPS su Apple Silicon); se GLiNER non si carica, resta un fallback euristico leggero.
+> **Venv Python (pipeline)**: dalla root, `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`, poi `python -m scripts.run_pipeline ...`. Opzionale: `CIBOBUONO_LLM_MODEL` → `.gguf`; `CIBOBUONO_NER_MODEL` sovrascrive l’id Hugging Face di GLiNER (default `knowledgator/gliner-x-large-v0.5`). **PyTorch** serve per il NER (CPU o MPS su Apple Silicon); se GLiNER non si carica, resta un fallback euristico leggero.
 
 > **ffmpeg**: necessario nel `PATH` per estrazione audio (yt-dlp) e Whisper (su macOS: `brew install ffmpeg`).
 
@@ -833,6 +900,72 @@ La pipeline è divisa in due fasi:
 | 13 | Push                 | git                          | Commit e push dei dati aggiornati                   |
 | 14 | Deploy               | GitHub Actions                | Build sito React, deploy su Pages                   |
 
+### Estrazione — Dettaglio Neuro-Simbolico
+
+La fase di estrazione (passo 6 nella tabella) combina tre livelli:
+
+```
+Trascrizione completa con timestamp
+     │
+     ├─→ [A] Discovery olistica LLM  ──────────────────────────────────→ lista locali + timestamp
+     │         (venue_discovery.py)                                               │
+     │                                                                            ↓
+     └─→ [B] Chunk da 90 s (overlap 15 s)                        [C] Merge + filtro cross-chunk
+               │                                                                  │
+               ├─→ GLiNER NER (parallelo, 4 worker)                              ↓
+               │   knowledgator/gliner-x-large-v0.5            Estrazioni finali con
+               │   19 etichette zero-shot:                      rating + sentiment + timestamp
+               │   Locale: restaurant · ristorante · pizzeria
+               │           trattoria · forno · panificio
+               │           pasticceria · gelateria · osteria
+               │           bakery · street food stall
+               │           food market · bar or cafe
+               │   Contesto: city · neighborhood · country
+               │             person · brand · food dish
+               │
+               └─→ Classificatore visita ──→ visite confermate ──→ Dettaglio LLM in batch
+                   (visit_classifier.py)                           (batch_visit_llm.py)
+                   Regole italiane prima:                          rating: "8" / "8--" / "6++"
+                   • verbi di visita espliciti                     sentiment: positive/neutral/negative
+                   • preposizioni di movimento
+                   LLM sì/no solo se ambiguo
+                   (deve citare uno span testuale verbatim)
+```
+
+**[A] Discovery olistica** (`venue_discovery.py`): L'intera trascrizione con timestamp viene inviata all'LLM in un unico prompt JSON strutturato. L'LLM restituisce una lista di locali visitati con timestamp approssimativi e qualsiasi voto o sentiment dichiarato. Questo passaggio a contesto esteso cattura i locali che il NER a chunk ha mancato.
+
+**[B] NER GLiNER** (`ner_candidates.py`): Ogni chunk da 90 secondi viene analizzato da GLiNER x-large in parallelo su 4 CPU worker. Su sistemi CUDA, GLiNER è fissato su CPU per lasciare la VRAM a Whisper e all'LLM. Impostando `CIBOBUONO_GLINER_CPU=0` si abilita l'inferenza GPU (GLiNER x-large occupa ~1.5 GB su GPU; su macchine con ≥16 GB VRAM e un LLM 14B c'è spazio abbondante, rendendo il NER 10–20× più veloce).
+
+**Classificatore visita** (`visit_classifier.py`): Regole regex italiane decidono la maggior parte dei casi. L'LLM viene chiamato solo per i candidati ambigui e deve rispondere con un sì/no binario e uno span di evidenza testuale verbatim.
+
+**Valutazione LLM in batch** (`batch_visit_llm.py`): Tutti i candidati NER confermati come visite vengono inviati all'LLM in una singola chiamata batch che estrae `rating` e `sentiment` per ogni visita in una volta sola.
+
+**Parametri dei chunk**: 90 s con 15 s di overlap garantisce che una menzione a cavallo di un confine venga catturata. Una tipica visita a un ristorante in questi video dura 60–180 s di commento, quindi 90 s è una finestra naturale.
+
+**Formato del voto**: Il campo `rating` memorizza il punteggio esatto espresso dal blogger come stringa:
+
+| Formato | Significato |
+|---------|-------------|
+| `"8"` | Punteggio intero esatto (più comune) |
+| `"8--"` | Poco sotto l'8 (`"quasi un 8 meno meno"`) |
+| `"8-"` | Appena sotto l'8 |
+| `"7+"` | Appena sopra il 7 |
+| `"7++"` | Quasi un 8 |
+| `null` | Nessun punteggio numerico dichiarato; il sentiment viene comunque estratto |
+
+Il core numerico deve essere compreso tra 1 e 10; il validator Pydantic rifiuta valori fuori range.
+
+**`initial_prompt` di Whisper**: Ogni trascrizione viene introdotta da un breve preambolo italiano con tipi di locali, nomi noti, città italiane e frasi di visita. Questo riduce significativamente gli errori ASR sui nomi propri dei ristoranti rispetto alla decodifica senza prompt.
+
+**Scelta dei modelli**:
+
+| Componente | Modello | Perché |
+|------------|---------|--------|
+| ASR | `whisper-large-v3-turbo` (faster-whisper, CUDA fp16) | Miglior rapporto velocità/accuratezza per l'italiano; il `large-v3` full è ~2× più lento per un guadagno marginale |
+| NER | `knowledgator/gliner-x-large-v0.5` | Il più grande GLiNER zero-shot disponibile; backbone mT5 multilingue, nessun fine-tuning richiesto |
+| LLM | `Qwen2.5-14B-Instruct-Q4_K_M.gguf` | Full CUDA offload a 8.4 GB; ottimo italiano e output JSON strutturato; il tier 27B default (`gemma-3-27b`) richiede autenticazione HF |
+| Geocoding | Nominatim + Overpass (OSM) | Nessuna API a pagamento; Nominatim copre bene le città italiane; la verifica Overpass `amenity=*` è il filtro anti-falsi-positivi più efficace |
+
 ### Opzioni della Pipeline
 
 ```
@@ -986,8 +1119,9 @@ pip install -r requirements.txt
 mkdir -p models
 # Consigliati (auto-selezionati in base alla RAM in quest'ordine):
 #   ≥40 GB → Qwen2.5-72B-Instruct-Q4_K_M.gguf  oppure  Llama-3.3-70B-Instruct-Q4_K_M.gguf
-#   ≥24 GB → Qwen2.5-32B-Instruct-Q4_K_M.gguf  oppure  gemma-3-27b-it-Q4_K_M.gguf
-#   ≥12 GB → Velvet-14B-Q4_K_M.gguf            (focalizzato italiano)
+#   ≥24 GB → Qwen2.5-32B-Instruct-Q4_K_M.gguf
+#            gemma-3-27b-it-Q4_K_M.gguf         (richiede login HF: huggingface-cli login)
+#   ≥12 GB → Qwen2.5-14B-Instruct-Q4_K_M.gguf  (ottimo italiano, full CUDA offload ≤16 GB VRAM)
 #   ≥6  GB → Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 #   ≥3  GB → Phi-3-mini-4k-Instruct-Q4_K_M.gguf  oppure  Qwen2.5-3B-Instruct-Q4_K_M.gguf
 #   ≥1.5GB → tinyllama-1.1b-chat-v1.0-Q4_K_M.gguf  (Raspberry Pi 4)

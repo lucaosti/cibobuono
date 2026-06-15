@@ -1,9 +1,11 @@
 """
 pipeline_executor.py — Overlap CPU/network postprocess with GPU work on the next video.
 
-Videos are independent; the GPU runs Whisper OR LLM (not both). While the GPU
-transcribes/extracts video N+1, video N is geocoded/verified/populated on a
-background thread.
+On high-VRAM systems (RTX 5080 etc.) Whisper (~3.5 GB) and the LLM (~8.4 GB)
+fit simultaneously, so we pipeline them: while the LLM extracts video N the
+next Whisper transcription (N+1) runs in a background thread.  The main thread
+picks up the finished transcript when it reaches video N+1, eliminating the
+sequential Whisper→LLM toggle.
 """
 
 from __future__ import annotations
@@ -34,6 +36,20 @@ def parallel_postprocess_enabled(has_cuda: bool) -> bool:
     if raw in ("1", "true", "yes", "on"):
         return True
     return has_cuda
+
+
+def parallel_whisper_enabled(has_cuda: bool, gpu_vram_gb: float | None) -> bool:
+    """True when Whisper + LLM can coexist in VRAM (≥12 GB threshold).
+
+    Keeps both models loaded simultaneously and pipelines Whisper-N+1 behind
+    LLM-N, eliminating the sequential VRAM toggle between videos.
+    """
+    raw = os.environ.get("CIBOBUONO_PARALLEL_WHISPER", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return has_cuda and (gpu_vram_gb is not None) and gpu_vram_gb >= 12.0
 
 
 @dataclass
@@ -300,17 +316,29 @@ def _warm_video_cache(video_id: str, url: str) -> None:
         logger.debug("IO warm cache failed for %s: %s", video_id, exc)
 
 
+def _run_transcript_prefetch(video_id: str, model_name: str) -> dict | None:
+    """Transcribe video_id in a background thread while the main thread runs the LLM."""
+    try:
+        from scripts.transcribe_video import transcribe_audio
+        return transcribe_audio(video_id, model_name)
+    except Exception as exc:
+        logger.warning("Background Whisper failed for %s: %s", video_id, exc)
+        return None
+
+
 class PipelineExecutor:
-    """Background IO warmup + deferred geocode/OSM/populate."""
+    """Background IO warmup + deferred geocode/OSM/populate + parallel Whisper prefetch."""
 
     def __init__(
         self,
         *,
         parallel_postprocess: bool,
+        parallel_whisper: bool = False,
         io_workers: int = 4,
         max_pending_finalize: int = 2,
     ):
         self.parallel_postprocess = parallel_postprocess
+        self.parallel_whisper = parallel_whisper
         self.max_pending_finalize = max(1, max_pending_finalize)
         self._io_pool = ThreadPoolExecutor(
             max_workers=io_workers, thread_name_prefix="io_prep"
@@ -318,9 +346,15 @@ class PipelineExecutor:
         self._post_pool = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="postprocess"
         )
+        self._whisper_pool: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper_bg")
+            if parallel_whisper
+            else None
+        )
         self._finalize_futures: list[Future] = []
         self._completed: list[FinalizeResult] = []
         self._intel_futures: dict[str, Future] = {}
+        self._transcript_futures: dict[str, Future] = {}
 
     def schedule_intel_prep(self, video_id: str, title: str) -> None:
         """Prefetch metadata + intel for a video while GPU works on another."""
@@ -340,6 +374,42 @@ class PipelineExecutor:
         except Exception as exc:
             logger.warning("Prefetched intel failed for %s: %s", video_id, exc)
             return IntelPrepResult(video_id=video_id, error=str(exc))
+
+    def schedule_transcript_prefetch(self, video_id: str, model_name: str) -> None:
+        """Submit a background Whisper transcription while the LLM handles the previous video.
+
+        Only submits when parallel_whisper is enabled and no future is already queued
+        for this video.  The background thread shares GPU with the main-thread LLM
+        but both fit in VRAM on ≥12 GB cards.
+        """
+        if not self._whisper_pool or video_id in self._transcript_futures:
+            return
+        logger.debug("Scheduling background Whisper for %s", video_id)
+        self._transcript_futures[video_id] = self._whisper_pool.submit(
+            _run_transcript_prefetch, video_id, model_name
+        )
+
+    def take_transcript_prefetch(
+        self, video_id: str, model_name: str
+    ) -> dict | None:
+        """Return the prefetched transcript, waiting if still in progress.
+
+        Falls back to synchronous transcription if no future was scheduled
+        (first video in batch, or parallel_whisper disabled).
+        """
+        fut = self._transcript_futures.pop(video_id, None)
+        if fut is None:
+            from scripts.transcribe_video import transcribe_audio
+            return transcribe_audio(video_id, model_name)
+        try:
+            result = fut.result()
+            if result is not None:
+                logger.debug("Background Whisper ready for %s", video_id)
+            return result
+        except Exception as exc:
+            logger.warning("Background Whisper failed for %s (%s) — retrying sync", video_id, exc)
+            from scripts.transcribe_video import transcribe_audio
+            return transcribe_audio(video_id, model_name)
 
     def schedule_io_prep(
         self,
@@ -419,5 +489,8 @@ class PipelineExecutor:
     def shutdown(self) -> None:
         self.drain_finalize()
         self._intel_futures.clear()
+        self._transcript_futures.clear()
         self._io_pool.shutdown(wait=False, cancel_futures=True)
         self._post_pool.shutdown(wait=True)
+        if self._whisper_pool:
+            self._whisper_pool.shutdown(wait=False, cancel_futures=True)

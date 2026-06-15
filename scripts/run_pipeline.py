@@ -352,11 +352,26 @@ def run_pipeline(
 
         stopped_gracefully = False
 
-        from scripts.pipeline_executor import FinalizeJob, PipelineExecutor
+        from scripts.pipeline_executor import (
+            FinalizeJob,
+            PipelineExecutor,
+            parallel_whisper_enabled,
+        )
 
         io_workers = int(os.environ.get("CIBOBUONO_IO_WORKERS", "4"))
+        _par_whisper = (
+            parallel_whisper_enabled(profile.has_cuda, profile.gpu_vram_gb)
+            and not skip_transcribe
+            and not skip_extract
+        )
+        if _par_whisper:
+            _log(
+                f"Parallel Whisper enabled (VRAM={profile.gpu_vram_gb} GB) — "
+                "Whisper(N+1) will run alongside LLM(N)"
+            )
         executor = PipelineExecutor(
             parallel_postprocess=parallel_postprocess and not skip_extract,
+            parallel_whisper=_par_whisper,
             io_workers=io_workers,
         )
 
@@ -527,14 +542,14 @@ def run_pipeline(
                 # Step 4: Transcribe
                 dash.set_step("Transcribe")
                 if not skip_transcribe:
-                    # Hand VRAM from LLM (previous extract/food-check) to Whisper.
-                    if profile.has_cuda:
+                    # Parallel mode: both Whisper and LLM stay in VRAM together.
+                    # Sequential mode: release LLM first so Whisper can use VRAM.
+                    if profile.has_cuda and not _par_whisper:
                         from scripts.extract_locales import release_llm
 
                         release_llm()
                     _log("  Transcribing...")
-                    from scripts.transcribe_video import transcribe_audio
-                    transcript = transcribe_audio(video_id, whisper_model)
+                    transcript = executor.take_transcript_prefetch(video_id, whisper_model)
                     if not transcript:
                         _log(f"  ✗ Transcription failed for {video_id}")
                         _err(video_id, channel_id, publish_date, "transcribe", recap)
@@ -555,15 +570,25 @@ def run_pipeline(
                     transcript_chars=len(transcript.get("text", "")),
                 )
 
-                # Free Whisper VRAM before LLM-heavy extraction (same GPU).
+                # Hand VRAM from Whisper to LLM (sequential) -OR- submit the
+                # next Whisper to a background thread while keeping both models
+                # in VRAM (parallel mode).
                 if not skip_transcribe:
-                    from scripts.transcribe_video import release_whisper_model
+                    if _par_whisper:
+                        # Schedule Whisper for the next video while LLM runs now.
+                        if i < len(to_process):
+                            next_vid = to_process[i]
+                            executor.schedule_transcript_prefetch(
+                                next_vid["video_id"], whisper_model
+                            )
+                    else:
+                        from scripts.transcribe_video import release_whisper_model
 
-                    release_whisper_model()
-                    if not skip_extract and profile.has_cuda:
-                        from scripts.extract_locales import preload_llm
+                        release_whisper_model()
+                        if not skip_extract and profile.has_cuda:
+                            from scripts.extract_locales import preload_llm
 
-                        preload_llm(executor._io_pool if executor else None)
+                            preload_llm(executor._io_pool if executor else None)
 
                 # Step 5: Chunk
                 dash.set_step("Chunk")

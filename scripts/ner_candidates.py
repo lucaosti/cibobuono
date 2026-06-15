@@ -34,43 +34,32 @@ def _refine_candidate_text(raw: str) -> str:
     s = _VENUE_PREFIX.sub("", s).strip()
     return s
 
-# GLiNER labels (natural phrases work better than single tokens for multiv2.1)
+# GLiNER labels — broad semantic phrases so the model generalises to venue types
+# not explicitly listed (taverna, kebabbaro, focacceria, etc.).  Fewer labels
+# also speed up GLiNER inference.  The LLM validation step downstream filters
+# false positives, so higher recall here is more important than precision.
 NER_LABELS = [
-    "restaurant",
-    "ristorante",
+    # Venue labels (5 broad categories)
+    "restaurant, trattoria, osteria or food venue",
     "pizzeria",
-    "trattoria",
-    "forno",
-    "panificio",
-    "pasticceria",
-    "gelateria",
-    "osteria",
-    "bakery",
-    "street food stall",
-    "food market",
-    "bar or cafe",
-    "food dish",
+    "bakery, pastry shop or gelateria",
+    "bar, cafe, wine bar or enoteca",
+    "street food stall, rosticceria, friggitoria or food market",
+    # Context labels (unchanged)
     "city",
     "neighborhood",
     "country",
     "person",
     "brand",
+    "food dish",
 ]
 
 VENUE_LABELS = frozenset({
-    "restaurant",
-    "ristorante",
+    "restaurant, trattoria, osteria or food venue",
     "pizzeria",
-    "trattoria",
-    "forno",
-    "panificio",
-    "pasticceria",
-    "gelateria",
-    "osteria",
-    "bakery",
-    "street food stall",
-    "food market",
-    "bar or cafe",
+    "bakery, pastry shop or gelateria",
+    "bar, cafe, wine bar or enoteca",
+    "street food stall, rosticceria, friggitoria or food market",
 })
 
 CONTEXT_LABELS = frozenset({
@@ -168,7 +157,16 @@ def _patch_gliner_tokenizer() -> None:
     gt._cibobuono_patched = True
 
 
+_GLINER_GPU_MIN_FREE_VRAM_GB = 2.5  # GLiNER x-large is ~1.5 GB on GPU
+
+
 def _gliner_use_cpu() -> bool:
+    """Return True if GLiNER should be pinned to CPU.
+
+    In auto mode (default): use GPU when free VRAM >= 2.5 GB at load time.
+    This covers the typical case where the LLM is already loaded (8–9 GB)
+    but 7+ GB of VRAM is still free — more than enough for GLiNER x-large.
+    """
     mode = os.environ.get("CIBOBUONO_GLINER_CPU", "auto").strip().lower()
     if mode in ("0", "false", "no", "off"):
         return False
@@ -176,21 +174,33 @@ def _gliner_use_cpu() -> bool:
         return True
     try:
         from scripts.hardware import get_profile
-
-        return get_profile().has_cuda
+        if not get_profile().has_cuda:
+            return False  # Non-CUDA: no GPU to reserve; let GLiNER choose
+        # Check runtime free VRAM so we don't pin unnecessarily when there is
+        # enough headroom (e.g. 7 GB free after loading a 14B LLM on 16 GB).
+        try:
+            import torch
+            if torch.cuda.is_available():
+                free_bytes, _ = torch.cuda.mem_get_info(0)
+                if free_bytes / 1024**3 >= _GLINER_GPU_MIN_FREE_VRAM_GB:
+                    return False  # plenty of room → GPU
+        except Exception:
+            pass
+        return True  # conservative fallback: CPU
     except Exception:
         return False
 
 
 def _maybe_pin_gliner_cpu(model) -> None:
-    """Keep GLiNER off the CUDA device so Whisper/LLM can use the full GPU."""
+    """Pin GLiNER to CPU when VRAM headroom is insufficient for GPU inference."""
     if not _gliner_use_cpu():
+        logger.info("GLiNER on GPU — sufficient free VRAM for parallel inference")
         return
     try:
         import torch
 
         model.to(torch.device("cpu"))
-        logger.info("GLiNER pinned to CPU — GPU reserved for Whisper/LLM")
+        logger.info("GLiNER pinned to CPU — insufficient free VRAM for GPU inference")
     except Exception as e:
         logger.debug(f"GLiNER CPU pin skipped: {e}")
 

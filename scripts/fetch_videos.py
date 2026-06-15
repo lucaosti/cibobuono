@@ -21,6 +21,7 @@ __author__ = "Luca Ostinelli"
 import json
 import re
 import subprocess
+import threading
 from pathlib import Path
 
 from scripts.utils import (
@@ -45,6 +46,7 @@ logger = setup_logging("fetch_videos")
 # Recipe detection
 # ---------------------------------------------------------------------------
 
+# Fast keyword pre-filter: recipe/cooking signals (short, precise list).
 RECIPE_KEYWORDS = [
     "ricetta", "ricette", "recipe", "recipes",
     "cucino", "cuciniamo", "preparo", "prepariamo", "preparazione",
@@ -54,7 +56,9 @@ RECIPE_KEYWORDS = [
     "impasto", "lievitazione",
 ]
 
-# Title keywords that indicate a video is NOT a food review
+# Keyword fallback for non-food detection — used only when the semantic
+# classifier is unavailable.  New video categories are handled automatically
+# by the classifier without adding keywords here.
 NON_FOOD_KEYWORDS = [
     # Sport / fitness / combat
     "boxe", "boxing", "allenamento", "palestra", "workout", "fitness",
@@ -80,6 +84,52 @@ NON_FOOD_KEYWORDS = [
     "prank", "scherzo", "challenge estrema",
 ]
 
+# ---------------------------------------------------------------------------
+# Semantic video title classifier (zero-shot NLI)
+# Replaces the endless NON_FOOD_KEYWORDS list with context understanding.
+# Falls back to keyword matching when the model is unavailable.
+# ---------------------------------------------------------------------------
+
+_ZSC_MODEL_NAME = "joeddav/xlm-roberta-large-xnli"
+# No recipe label here — keyword matching handles recipes precisely without
+# false-positives on food review titles that contain food words (e.g. "shawarma").
+_ZSC_LABELS = [
+    "recensione di ristorante o cibo",
+    "sport, boxe o fitness",
+    "gaming, musica o intrattenimento",
+]
+_ZSC_FOOD_LABEL = _ZSC_LABELS[0]
+_ZSC_SKIP_THRESHOLD = 0.80  # high bar to avoid borderline false positives
+
+_zsc_classifier = None  # None = not tried; False = failed
+_zsc_lock = threading.Lock()
+
+
+def _load_title_classifier():
+    """Lazy-load the multilingual zero-shot NLI classifier (cached process-wide)."""
+    global _zsc_classifier
+    if _zsc_classifier is not None:
+        return _zsc_classifier if _zsc_classifier is not False else None
+    with _zsc_lock:
+        if _zsc_classifier is not None:
+            return _zsc_classifier if _zsc_classifier is not False else None
+        try:
+            from transformers import pipeline  # noqa: PLC0415
+            cls = pipeline(
+                "zero-shot-classification",
+                model=_ZSC_MODEL_NAME,
+                device=-1,  # CPU — runs in parallel with GPU Whisper/LLM
+            )
+            _zsc_classifier = cls
+            logger.info("Loaded semantic video title classifier (%s)", _ZSC_MODEL_NAME)
+        except Exception as exc:
+            logger.warning(
+                "Semantic classifier unavailable (%s) — keyword fallback active",
+                exc,
+            )
+            _zsc_classifier = False
+    return _zsc_classifier if _zsc_classifier is not False else None
+
 
 def detect_recipe_video(title: str) -> tuple[bool, str]:
     """Return (True, reason) if the title suggests a recipe/cooking video."""
@@ -93,20 +143,16 @@ def detect_recipe_video(title: str) -> tuple[bool, str]:
 def detect_non_food_video(title: str, description: str = "") -> tuple[bool, str]:
     """Return (True, reason) if the title/description clearly indicates a non-food video.
 
-    This is a blacklist approach: skip videos about boxing, gaming, fitness,
-    tutorials, etc. — topics that are definitely NOT food reviews.
-    Videos with ambiguous titles still pass through (better to process than miss).
-
-    Uses word-boundary matching to avoid false positives like 'mma' matching
-    inside 'MAMMA' or 'TOMMASO'.
+    Uses word-boundary keyword matching to avoid false positives like 'mma'
+    matching inside 'MAMMA' or 'TOMMASO'.  Conservative by design: ambiguous
+    titles stay pending rather than being skipped.
     """
     for text_label, text in [("title", title), ("description", description)]:
         if not text:
             continue
         text_lower = text.lower().strip()
         for kw in NON_FOOD_KEYWORDS:
-            # Use word boundaries for short keywords to avoid substring false positives
-            if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
+            if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
                 return True, f'Non-food video ({text_label}): "{kw}"'
     return False, ""
 

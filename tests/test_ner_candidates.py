@@ -2,7 +2,15 @@
 
 __author__ = "Luca Ostinelli"
 
-from scripts.ner_candidates import Candidate, extract_chunk_candidates
+import types
+
+from scripts.ner_candidates import (
+    CONTEXT_LABELS,
+    NER_LABELS,
+    VENUE_LABELS,
+    Candidate,
+    extract_chunk_candidates,
+)
 
 
 def test_heuristic_extracts_capitalized_name(monkeypatch):
@@ -92,6 +100,43 @@ def test_parallel_ner_all_chunks(monkeypatch):
     names = {v.name for venues, _ in out.values() for v in venues}
     assert any("Rossi" in n or "Forno" in n for n in names)
     assert any("Bianchi" in n for n in names)
+
+
+def test_semantic_venue_labels_in_ner_labels():
+    # Broad semantic labels cover all venue types (incl. rosticceria, enoteca, hamburgeria…)
+    for label in VENUE_LABELS:
+        assert label in NER_LABELS, f"VENUE_LABEL not in NER_LABELS: {label}"
+    # Street food label must cover historical rosticceria/friggitoria/enoteca use-cases
+    street_label = next((l for l in VENUE_LABELS if "street food" in l or "rosticceria" in l), None)
+    assert street_label is not None, "Expected a street food / rosticceria label"
+    bar_label = next((l for l in VENUE_LABELS if "bar" in l or "enoteca" in l), None)
+    assert bar_label is not None, "Expected a bar / enoteca label"
+
+
+def test_venue_and_context_labels_are_disjoint():
+    assert VENUE_LABELS.isdisjoint(CONTEXT_LABELS)
+
+
+def test_gliner_use_cpu_forced_off(monkeypatch):
+    monkeypatch.setenv("CIBOBUONO_GLINER_CPU", "0")
+    from scripts.ner_candidates import _gliner_use_cpu
+    assert _gliner_use_cpu() is False
+
+
+def test_gliner_use_cpu_forced_on(monkeypatch):
+    monkeypatch.setenv("CIBOBUONO_GLINER_CPU", "1")
+    from scripts.ner_candidates import _gliner_use_cpu
+    assert _gliner_use_cpu() is True
+
+
+def test_gliner_cpu_auto_no_cuda(monkeypatch):
+    """Auto mode without CUDA: GLiNER should NOT be pinned to CPU."""
+    monkeypatch.delenv("CIBOBUONO_GLINER_CPU", raising=False)
+    import scripts.hardware as hw_mod
+    monkeypatch.setattr(hw_mod, "get_profile", lambda: types.SimpleNamespace(has_cuda=False))
+    from scripts.ner_candidates import _gliner_use_cpu
+    # No CUDA → no GPU to reserve → let GLiNER go wherever it wants (not CPU-pinned)
+    assert _gliner_use_cpu() is False
 
 
 def test_parallel_ner_chunk_exception_does_not_crash(monkeypatch):

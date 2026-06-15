@@ -12,12 +12,84 @@ __author__ = "Luca Ostinelli"
 
 import json
 import os
+import re
 import tempfile
 import time
 
 from scripts.utils import CACHE_DIR, CONTENT_LANGUAGE, ensure_dirs, setup_logging
 
 logger = setup_logging("geocode")
+
+# Italian cities and Rome neighborhoods that appear in YouTube food video titles.
+# Used by _clean_city() to extract a usable city name from noisy strings like
+# "nuova HIT a CENTOCELLE" → "Centocelle".
+_KNOWN_CITIES: frozenset[str] = frozenset({
+    "Roma", "Milano", "Napoli", "Torino", "Firenze", "Bologna", "Venezia",
+    "Genova", "Palermo", "Catania", "Bari", "Verona", "Padova", "Brescia",
+    "Bergamo", "Parma", "Modena", "Viterbo", "Frosinone", "Latina", "Rieti",
+    "Caserta", "Salerno", "Messina", "Lecce", "Reggio Calabria", "Perugia",
+    "Ancona", "Trieste", "Cagliari", "Bolzano", "Trento", "Udine", "Ravenna",
+    "Ferrara", "Piacenza", "Rimini", "Pesaro", "Foggia", "Taranto", "Matera",
+    "Cosenza", "Catanzaro", "Reggio Emilia", "Prato", "Livorno", "Pisa",
+    "Arezzo", "Siena", "Grosseto", "Lucca", "Pistoia", "Massa", "Carrara",
+    "Berlino", "Parigi", "Londra", "Madrid", "New York", "Tokyo", "Osaka",
+    "Napoli", "Berlino",
+})
+_ROMAN_NEIGHBORHOODS: frozenset[str] = frozenset({
+    "Centocelle", "Pigneto", "Testaccio", "Trastevere", "Ostiense", "Prati",
+    "Nomentano", "Tiburtino", "Prenestino", "Tuscolano", "Esquilino", "Monti",
+    "Parioli", "Trionfale", "Garbatella", "Torpignattara", "Quadraro",
+    "Don Bosco", "Casilino", "Marconi", "Portuense", "Gianicolense",
+    "Magliana", "Acilia", "Ostia", "Fiumicino", "Ciampino",
+})
+# Neighborhoods that map to their parent city for geocoding purposes.
+_NEIGHBORHOOD_TO_CITY: dict[str, str] = {n.lower(): "Roma" for n in _ROMAN_NEIGHBORHOODS}
+
+
+def _clean_city(city: str) -> str:
+    """Extract a usable city name from a potentially noisy city string.
+
+    Handles titles like "nuova HIT a CENTOCELLE" → "Centocelle" and
+    bare neighborhood names like "Centocelle" → "Roma".
+    """
+    if not city:
+        return ""
+    city = city.strip()
+
+    # Direct match against known cities / neighborhoods (case-insensitive)
+    city_lower = city.lower()
+    for known in _KNOWN_CITIES:
+        if city_lower == known.lower():
+            return known
+    for nbh in _ROMAN_NEIGHBORHOODS:
+        if city_lower == nbh.lower():
+            return "Roma"
+
+    # Substring search: find a known city/neighborhood within the noisy string
+    for known in sorted(_KNOWN_CITIES, key=len, reverse=True):
+        if re.search(r'\b' + re.escape(known) + r'\b', city, re.IGNORECASE):
+            return known
+    for nbh in sorted(_ROMAN_NEIGHBORHOODS, key=len, reverse=True):
+        if re.search(r'\b' + re.escape(nbh) + r'\b', city, re.IGNORECASE):
+            logger.debug(f"City cleaned: '{city}' → 'Roma' via neighborhood '{nbh}'")
+            return "Roma"
+
+    # Last resort: extract the last word(s) that start with an uppercase letter
+    words = city.split()
+    tail: list[str] = []
+    for w in reversed(words):
+        w_clean = re.sub(r"[^\w]", "", w)
+        if w_clean and w_clean[0].isupper() and len(w_clean) >= 3:
+            tail.insert(0, w_clean)
+        elif tail:
+            break
+    if tail:
+        candidate = " ".join(tail)
+        if candidate.lower() != city.lower():
+            logger.debug(f"City cleaned: '{city}' → '{candidate}'")
+        return candidate
+
+    return city
 
 # Cache file for geocoding results
 GEOCODE_CACHE_FILE = CACHE_DIR / "geocode_cache.json"
@@ -89,6 +161,7 @@ def geocode_locale(
         logger.error("geopy not installed. Install with: pip install geopy")
         return None
 
+    city = _clean_city(city)
     cache_key = f"{name}|{city}|{address}".lower().strip()
     cache = _load_geocode_cache()
     if cache_key in cache:
