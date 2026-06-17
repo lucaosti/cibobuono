@@ -39,8 +39,11 @@ FLAGGED_SEGMENTS_JSON = DATA_DIR / "flagged_segments.json"
 SKIPPED_VIDEOS_JSON = DATA_DIR / "skipped_videos.json"
 CORRECTIONS_JSON = DATA_DIR / "corrections.json"
 
-# --- Confidence threshold ---
-CONFIDENCE_THRESHOLD = 0.72
+# --- Confidence thresholds ---
+CONFIDENCE_THRESHOLD = 0.72   # minimum to publish without flagging (batch-LLM mention)
+CONF_RULE_VISIT = 0.82        # rule-confirmed visit candidate
+CONF_BATCH_VISIT = 0.85       # batch-LLM confirmed on-site visit
+CONF_CHAPTER_HINT = 0.88      # chapter title anchor confirms the visit
 
 # --- Deduplication settings ---
 DEDUP_DISTANCE_METERS = 200
