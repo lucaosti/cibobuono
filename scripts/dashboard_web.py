@@ -99,7 +99,7 @@ class _Handler(BaseHTTPRequestHandler):
                     payload = content
                 self._json({"name": name, "kind": kind, "content": payload})
             except KeyError:
-                self._json({"error": "File non consentito"}, status=404)
+                self._json({"error": "File not allowed"}, status=404)
             except OSError as e:
                 self._json({"error": str(e)}, status=500)
         else:
@@ -189,7 +189,7 @@ class _Handler(BaseHTTPRequestHandler):
                 write_editable(name, body.get("content"))
                 self._json({"ok": True, "message": f"Salvato {name}"})
             except KeyError:
-                self._json({"error": "File non consentito"}, status=404)
+                self._json({"error": "File not allowed"}, status=404)
             except (ValueError, TypeError) as e:
                 self._json({"error": str(e)}, status=400)
             except OSError as e:

@@ -250,7 +250,7 @@ def finalize_video(job: FinalizeJob, log: LogFn | None = None) -> FinalizeResult
                 fe["confidence"] = min(float(fe.get("confidence", 0.5)), 0.45)
                 fe["_flag_reason"] = why
                 flagged_extractions.append(fe)
-                _log(f"  [{job.video_id}] Non pubblicato '{e.get('locale_name')}': {why}")
+                _log(f"  [{job.video_id}] Not published '{e.get('locale_name')}': {why}")
         extractions = publishable
         n_published = len(extractions)
 

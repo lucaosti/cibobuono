@@ -183,7 +183,7 @@ def request_stop() -> tuple[bool, str]:
 
     state["stop_requested"] = True
     state["status"] = "stopping"
-    state["message"] = "Stop richiesto (dopo il video corrente)"
+    state["message"] = "Stop requested (after current video)"
     write_state(state)
 
     try:

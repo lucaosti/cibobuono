@@ -231,18 +231,44 @@ def run_pipeline(
         _log("Pre-loading Whisper model…")
         _get_whisper_model(whisper_model)
 
-    def _refresh_stats() -> None:
-        vc = _count_videos_by_status()
+    # Snapshot counts once at the start of the run; update incrementally
+    # instead of re-reading all JSON files after every video.
+    _stats: dict = {
+        "total": 0, "pending": 0, "processed": 0, "errored": 0,
+        "skipped": len(load_json(SKIPPED_VIDEOS_JSON)),
+        "channels": len(load_json(CHANNELS_JSON)),
+        "locales_found": len(load_json(LOCALES_JSON)),
+        "visits_created": len(load_json(VISITS_JSON)),
+        "flagged": len(load_json(FLAGGED_SEGMENTS_JSON)),
+    }
+    _vc = _count_videos_by_status()
+    _stats.update(_vc)
+
+    def _refresh_stats(
+        *,
+        delta_pending: int = 0,
+        delta_processed: int = 0,
+        delta_errored: int = 0,
+        delta_visits: int = 0,
+        delta_flagged: int = 0,
+        delta_locales: int = 0,
+    ) -> None:
+        _stats["pending"] += delta_pending
+        _stats["processed"] += delta_processed
+        _stats["errored"] += delta_errored
+        _stats["visits_created"] += delta_visits
+        _stats["flagged"] += delta_flagged
+        _stats["locales_found"] += delta_locales
         dash.set_totals(
-            total_in_db=vc["total"],
-            pending=vc["pending"],
-            processed=vc["processed"],
-            errored=vc["errored"],
-            skipped=len(load_json(SKIPPED_VIDEOS_JSON)),
-            channels=len(load_json(CHANNELS_JSON)),
-            locales_found=len(load_json(LOCALES_JSON)),
-            visits_created=len(load_json(VISITS_JSON)),
-            flagged=len(load_json(FLAGGED_SEGMENTS_JSON)),
+            total_in_db=_stats["total"],
+            pending=_stats["pending"],
+            processed=_stats["processed"],
+            errored=_stats["errored"],
+            skipped=_stats["skipped"],
+            channels=_stats["channels"],
+            locales_found=_stats["locales_found"],
+            visits_created=_stats["visits_created"],
+            flagged=_stats["flagged"],
         )
 
     def _dash_finish(
@@ -252,7 +278,12 @@ def run_pipeline(
         flagged: int = 0,
     ) -> None:
         dash.complete_video(outcome=outcome, visits=visits, flagged=flagged)
-        _refresh_stats()
+        if outcome in ("processed", "processed_empty"):
+            _refresh_stats(delta_pending=-1, delta_processed=1, delta_visits=visits, delta_flagged=flagged)
+        elif outcome == "errored":
+            _refresh_stats(delta_pending=-1, delta_errored=1)
+        else:
+            _refresh_stats(delta_pending=-1, delta_processed=1)
 
     run_report: dict = {
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -272,6 +303,8 @@ def run_pipeline(
         from scripts.fetch_channels import fetch_channels
         new_channels = fetch_channels()
         _log(f"{len(new_channels)} new channels")
+        if new_channels:
+            _stats["channels"] += len(new_channels)
         _refresh_stats()
 
         if not skip_fetch:
@@ -280,6 +313,10 @@ def run_pipeline(
             from scripts.fetch_videos import catalog_channel_videos
             n = catalog_channel_videos()
             _log(f"{n} new videos cataloged")
+            # Catalog can add many videos — re-read counts once after Phase 1.
+            _vc2 = _count_videos_by_status()
+            _stats.update(_vc2)
+            _stats["skipped"] = len(load_json(SKIPPED_VIDEOS_JSON))
             _refresh_stats()
         else:
             _log("Catalog skipped (--skip-fetch)")
@@ -406,17 +443,18 @@ def run_pipeline(
             if not pc.wait_if_paused(should_abort=lambda: _pipeline_shutdown["graceful"]):
                 _pipeline_shutdown["graceful"] = True
                 stopped_gracefully = True
-                _log("Stop richiesto dalla dashboard")
+                _log("Stop requested via dashboard")
                 break
 
             if executor:
                 for fr in executor.poll_completed():
                     if fr.outcome == "processed":
                         dash.tick_stat("processed")
+                        _refresh_stats(delta_visits=fr.visits_created, delta_flagged=fr.flagged_segments)
                     elif fr.outcome == "errored":
                         dash.tick_stat("errored")
                         _log(f"  ✗ Background finalize failed: {fr.error[:200]}")
-                    _refresh_stats()
+                        _refresh_stats()
 
             if executor:
                 executor.schedule_io_prep(to_process, i - 1, count=4)
@@ -773,9 +811,10 @@ def run_pipeline(
                 finalize_results.append(fr)
                 if fr.outcome == "processed":
                     dash.tick_stat("processed")
+                    _refresh_stats(delta_visits=fr.visits_created, delta_flagged=fr.flagged_segments)
                 elif fr.outcome == "errored":
                     dash.tick_stat("errored")
-                _refresh_stats()
+                    _refresh_stats()
 
         try:
             from scripts.pipeline_metrics import record_run_metrics

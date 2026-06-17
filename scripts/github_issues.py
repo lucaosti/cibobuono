@@ -67,7 +67,7 @@ def report_issue_url(
         lines.append(f"**Video:** {youtube_url}")
     elif video_id:
         lines.append(f"**Video ID:** {video_id}")
-    lines += ["", "---", "_Segnalazione creata dalla dashboard CiboBuono._"]
+    lines += ["", "---", "_Report created from the CiboBuono dashboard._"]
     return new_issue_url(title, "\n".join(lines), [LOCALE_REPORT_LABEL])
 
 

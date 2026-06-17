@@ -48,6 +48,14 @@ logger = setup_logging("extract_pipeline")
 
 DEFAULT_BATCH_SIZE = 10
 
+# Confidence ceilings and thresholds used across the NER → classification → merge pipeline.
+# Kept as module constants so callers see the same values without hunting for literals.
+CONF_RULE_VISIT = 0.82        # confidence assigned to rule-confirmed visit candidates
+CONF_BATCH_VISIT = 0.85       # batch-LLM confirmed visit
+CONF_BATCH_MENTION = 0.72     # batch-LLM confirmed mention (may still be flagged if NER high)
+NER_FLAG_SCORE_MIN = 0.42     # NER score floor to flag low-confidence mentions
+FUZZY_DEDUP_RATIO = 88        # thefuzz ratio threshold for near-duplicate name merge
+
 
 def _batch_llm_enabled() -> bool:
     raw = os.environ.get("CIBOBUONO_BATCH_LLM", "auto").strip().lower()
@@ -232,7 +240,7 @@ def _promote_venue_hints(
             "category": ["ristorante"],
             "rating": None,
             "sentiment": "neutral",
-            "notes": f"Promosso da hint {h.get('source', '?')}",
+            "notes": f"Promoted from hint {h.get('source', '?')}",
             "rubrica": rubrica,
             "confidence": conf,
             "chunk_start": seconds_to_timestamp(float(start or 0)),
@@ -285,7 +293,7 @@ def _merge_extraction_rows(
         for b in keys[i + 1 :]:
             if b in drop:
                 continue
-            if fuzz.ratio(a, b) >= 88 or a in b or b in a:
+            if fuzz.ratio(a, b) >= FUZZY_DEDUP_RATIO or a in b or b in a:
                 ra, rb = merged[a], merged[b]
                 if float(ra.get("confidence", 0)) >= float(rb.get("confidence", 0)):
                     drop.add(b)
@@ -454,7 +462,7 @@ def extract_from_video(
                     cand,
                     chunk,
                     evidence=f"[rule:{reason}]",
-                    conf=0.82,
+                    conf=CONF_RULE_VISIT,
                     src="rule",
                     detail=detail,
                     channel_rubriche=channel_rubriche,
@@ -517,7 +525,7 @@ def extract_from_video(
                 continue
             is_visit = ev.is_visit
             evidence = ev.evidence or f"[batch:{meta['reason']}]"
-            conf = 0.85 if is_visit else 0.72
+            conf = CONF_BATCH_VISIT if is_visit else CONF_BATCH_MENTION
             src = "llm"
         else:
             if not verify_venue_name(llm, name_clean, window):
@@ -527,7 +535,7 @@ def extract_from_video(
             )
 
         if not is_visit:
-            if cand.ner_score >= 0.42:
+            if cand.ner_score >= NER_FLAG_SCORE_MIN:
                 _append_flagged_candidate(
                     flagged,
                     cand,
