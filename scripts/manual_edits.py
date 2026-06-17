@@ -71,13 +71,13 @@ def remove_visit(
     visits = load_json(VISITS_JSON)
     target = next((v for v in visits if v.get("visit_id") == visit_id), None)
     if not target:
-        return False, "Visita non trovata"
+        return False, "Visit not found"
 
     locale_id = target.get("locale_id", "")
     visits = [v for v in visits if v.get("visit_id") != visit_id]
     save_json_split(VISITS_JSON, visits)
 
-    msg = f"Visita {visit_id} rimossa"
+    msg = f"Visit {visit_id} removed"
     if hide_locale and locale_id:
         corrections = load_json(CORRECTIONS_JSON)
         if not any(c.get("locale_id") == locale_id and c.get("type") == "hide" for c in corrections):
@@ -85,11 +85,11 @@ def remove_visit(
                 {
                     "locale_id": locale_id,
                     "type": "hide",
-                    "reason": (reason or "Rimosso manualmente dalla dashboard")[:300],
+                    "reason": (reason or "Removed manually via dashboard")[:300],
                 }
             )
             save_json(CORRECTIONS_JSON, corrections)
-        msg += f"; locale {locale_id} nascosto"
+        msg += f"; locale {locale_id} hidden"
     logger.info(msg)
     return True, msg
 
@@ -166,11 +166,11 @@ def add_manual_visit(
     if len(locale_name) < 2:
         return False, "Nome locale troppo corto", None
     if not video_id:
-        return False, "video_id obbligatorio", None
+        return False, "video_id required", None
 
     channel_id, publish_date = _video_meta(video_id)
     if not channel_id:
-        return False, f"Video {video_id} non trovato in videos.json", None
+        return False, f"Video {video_id} not found in videos.json", None
 
     from scripts.geocode_locales import geocode_locale
     from scripts.verify_locales import verify_locale_exists
@@ -190,7 +190,7 @@ def add_manual_visit(
 
     geo = geocode_locale(locale_name, city, address)
     if not geo:
-        return False, "Geocoding fallito — controlla nome e città", None
+        return False, "Geocoding failed — check name and city", None
 
     ext["lat"] = geo["lat"]
     ext["lon"] = geo["lon"]
@@ -202,16 +202,16 @@ def add_manual_visit(
         if not osm:
             return (
                 False,
-                "Non trovato su OpenStreetMap vicino alle coordinate — "
-                "verifica nome/città o disattiva require_osm",
+                "Not found on OpenStreetMap near coordinates — "
+                "check name/city or disable require_osm",
                 None,
             )
         score = int(osm.get("match_score", 0))
         if score < MIN_PUBLISH_OSM_SCORE:
             return (
                 False,
-                f"Match OSM debole ({score}% < {MIN_PUBLISH_OSM_SCORE}%) — "
-                f"nome OSM: '{osm.get('osm_name')}'",
+                f"Weak OSM match ({score}% < {MIN_PUBLISH_OSM_SCORE}%) — "
+                f"OSM name: '{osm.get('osm_name')}'",
                 None,
             )
         ext["osm_verified"] = True
@@ -223,15 +223,15 @@ def add_manual_visit(
 
     _, mapping = deduplicate_locales([ext])
     if not mapping:
-        return False, "Deduplicazione fallita", None
+        return False, "Deduplication failed", None
 
     new_visits = populate_visits(mapping, video_id, channel_id, publish_date)
     if not new_visits:
-        return False, "Visita già presente o validazione fallita", None
+        return False, "Visit already exists or validation failed", None
 
     visit = new_visits[0]
     logger.info("Manual visit added: %s @ %s", locale_name, video_id)
-    return True, f"Visita creata: {visit.get('visit_id')}", visit
+    return True, f"Visit created: {visit.get('visit_id')}", visit
 
 
 def promote_flagged_to_visit(
@@ -253,11 +253,11 @@ def promote_flagged_to_visit(
             seg = s
             break
     if not seg:
-        return False, "Segmento flaggato non trovato"
+        return False, "Flagged segment not found"
 
     name = (locale_name or seg.get("locale_name") or "").strip()
     if not name:
-        return False, "Nome locale mancante"
+        return False, "Locale name missing"
 
     ok, msg, _ = add_manual_visit(
         locale_name=name,

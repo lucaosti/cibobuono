@@ -28,16 +28,16 @@ from scripts.utils import (
 LOCALE_REPORTS_JSON = FLAGGED_SEGMENTS_JSON.parent / "locale_reports.json"
 
 _FLAG_REASON_LABELS = {
-    "possible_locale_mention_low_confidence": "Menzione incerta",
-    "low_confidence": "Bassa confidenza",
-    "single_chunk_visit": "Un solo segmento",
-    "hint_low_confidence": "Hint debole",
-    "geocoding_failed": "Geocoding fallito",
-    "osm_not_found": "Non trovato su OSM",
-    "rating_title_transcript_mismatch": "Voto titolo ≠ trascrizione",
-    "locale_name_not_identified": "Nome mancante",
-    "address_not_identified": "Indirizzo mancante",
-    "ambiguous_locale_reference": "Riferimento ambiguo",
+    "possible_locale_mention_low_confidence": "Uncertain mention",
+    "low_confidence": "Low confidence",
+    "single_chunk_visit": "Single segment",
+    "hint_low_confidence": "Weak hint",
+    "geocoding_failed": "Geocoding failed",
+    "osm_not_found": "Not found on OSM",
+    "rating_title_transcript_mismatch": "Rating title ≠ transcript",
+    "locale_name_not_identified": "Name missing",
+    "address_not_identified": "Address missing",
+    "ambiguous_locale_reference": "Ambiguous reference",
 }
 
 
@@ -115,14 +115,14 @@ def resolve_review(
         break
 
     if not found:
-        return False, "Segmento non trovato"
+        return False, "Segment not found"
 
     save_json(FLAGGED_SEGMENTS_JSON, flagged)
 
     if action == "reject" and target_name:
-        _add_hide_correction(target_name, notes or "Rifiutato in revisione")
+        _add_hide_correction(target_name, notes or "Rejected in review")
 
-    return True, f"Segmento segnato come {action}"
+    return True, f"Segment marked as {action}"
 
 
 def _add_hide_correction(locale_name: str, reason: str) -> None:
@@ -205,7 +205,7 @@ def submit_report(
                 {
                     "locale_id": locale_id,
                     "type": "hide",
-                    "reason": f"Segnalazione utente: {reason[:200]}",
+                    "reason": f"User report: {reason[:200]}",
                 }
             )
             save_json(CORRECTIONS_JSON, corrections)
@@ -225,8 +225,8 @@ def resolve_report(report_id: str, *, action: str = "resolved") -> tuple[bool, s
             r["status"] = action
             r["resolved_at"] = today_str()
             save_json(LOCALE_REPORTS_JSON, reports)
-            return True, "Segnalazione aggiornata"
-    return False, "Segnalazione non trovata"
+            return True, "Report updated"
+    return False, "Report not found"
 
 
 def visits_with_links(*, limit: int = 40) -> list[dict]:

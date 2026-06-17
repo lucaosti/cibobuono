@@ -21,7 +21,6 @@ __author__ = "Luca Ostinelli"
 import json
 import re
 import subprocess
-import threading
 from pathlib import Path
 
 from scripts.utils import (
@@ -41,6 +40,37 @@ from scripts.schemas import SkippedVideo, Video, VideoStatus
 
 logger = setup_logging("fetch_videos")
 
+# ---------------------------------------------------------------------------
+# Retry helpers for yt-dlp subprocess calls
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+_YTDLP_RETRIES = 2
+_YTDLP_RETRY_BASE_DELAY = 5.0  # seconds; doubles on each retry
+
+
+def _run_ytdlp_with_retry(cmd: list, *, timeout: int) -> subprocess.CompletedProcess:
+    """Run a yt-dlp command with simple exponential-backoff retry on transient failures.
+
+    Retries on returncode != 0 (rate-limit / transient network errors) up to
+    ``_YTDLP_RETRIES`` times.  ``TimeoutExpired`` is NOT retried — the caller
+    handles it.
+    """
+    delay = _YTDLP_RETRY_BASE_DELAY
+    for attempt in range(_YTDLP_RETRIES + 1):
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return result
+        if attempt < _YTDLP_RETRIES:
+            logger.warning(
+                "yt-dlp attempt %d/%d failed (rc=%d); retrying in %.0fs",
+                attempt + 1, _YTDLP_RETRIES + 1, result.returncode, delay,
+            )
+            _time.sleep(delay)
+            delay *= 2
+    return result  # return last failure for the caller to handle
+
 
 # ---------------------------------------------------------------------------
 # Recipe detection
@@ -56,9 +86,7 @@ RECIPE_KEYWORDS = [
     "impasto", "lievitazione",
 ]
 
-# Keyword fallback for non-food detection — used only when the semantic
-# classifier is unavailable.  New video categories are handled automatically
-# by the classifier without adding keywords here.
+# Keyword list for non-food video detection.  Add new terms here to extend coverage.
 NON_FOOD_KEYWORDS = [
     # Sport / fitness / combat
     "boxe", "boxing", "allenamento", "palestra", "workout", "fitness",
@@ -83,52 +111,6 @@ NON_FOOD_KEYWORDS = [
     # Other clearly non-food
     "prank", "scherzo", "challenge estrema",
 ]
-
-# ---------------------------------------------------------------------------
-# Semantic video title classifier (zero-shot NLI)
-# Replaces the endless NON_FOOD_KEYWORDS list with context understanding.
-# Falls back to keyword matching when the model is unavailable.
-# ---------------------------------------------------------------------------
-
-_ZSC_MODEL_NAME = "joeddav/xlm-roberta-large-xnli"
-# No recipe label here — keyword matching handles recipes precisely without
-# false-positives on food review titles that contain food words (e.g. "shawarma").
-_ZSC_LABELS = [
-    "recensione di ristorante o cibo",
-    "sport, boxe o fitness",
-    "gaming, musica o intrattenimento",
-]
-_ZSC_FOOD_LABEL = _ZSC_LABELS[0]
-_ZSC_SKIP_THRESHOLD = 0.80  # high bar to avoid borderline false positives
-
-_zsc_classifier = None  # None = not tried; False = failed
-_zsc_lock = threading.Lock()
-
-
-def _load_title_classifier():
-    """Lazy-load the multilingual zero-shot NLI classifier (cached process-wide)."""
-    global _zsc_classifier
-    if _zsc_classifier is not None:
-        return _zsc_classifier if _zsc_classifier is not False else None
-    with _zsc_lock:
-        if _zsc_classifier is not None:
-            return _zsc_classifier if _zsc_classifier is not False else None
-        try:
-            from transformers import pipeline  # noqa: PLC0415
-            cls = pipeline(
-                "zero-shot-classification",
-                model=_ZSC_MODEL_NAME,
-                device=-1,  # CPU — runs in parallel with GPU Whisper/LLM
-            )
-            _zsc_classifier = cls
-            logger.info("Loaded semantic video title classifier (%s)", _ZSC_MODEL_NAME)
-        except Exception as exc:
-            logger.warning(
-                "Semantic classifier unavailable (%s) — keyword fallback active",
-                exc,
-            )
-            _zsc_classifier = False
-    return _zsc_classifier if _zsc_classifier is not False else None
 
 
 def detect_recipe_video(title: str) -> tuple[bool, str]:
@@ -180,7 +162,7 @@ def fetch_video_list(channel_url: str) -> list[dict]:
     YouTube's native order (newest-first).
     """
     try:
-        result = subprocess.run(
+        result = _run_ytdlp_with_retry(
             [
                 *yt_dlp_command(),
                 "--flat-playlist",
@@ -188,8 +170,6 @@ def fetch_video_list(channel_url: str) -> list[dict]:
                 *YOUTUBE_EXTRACTOR_ARGS,
                 channel_url,
             ],
-            capture_output=True,
-            text=True,
             timeout=300,
         )
 
@@ -442,7 +422,7 @@ def download_audio(video_id: str, video_url: str) -> Path | None:
 
     try:
         url = video_url if video_url.startswith("http") else f"https://youtu.be/{video_id}"
-        result = subprocess.run(
+        result = _run_ytdlp_with_retry(
             [
                 *yt_dlp_command(),
                 "-x",
@@ -453,8 +433,6 @@ def download_audio(video_id: str, video_url: str) -> Path | None:
                 *YOUTUBE_EXTRACTOR_ARGS,
                 url,
             ],
-            capture_output=True,
-            text=True,
             timeout=600,
         )
 
@@ -634,8 +612,26 @@ def update_video_status(
     video_id: str,
     status: VideoStatus,
     publish_date: str = "",
+    *,
+    _videos_cache: dict[str, dict] | None = None,
 ) -> None:
-    """Update a video's status (and publish_date if provided) in videos.json."""
+    """Update a video's status (and publish_date if provided) in videos.json.
+
+    Pass ``_videos_cache`` (a ``{video_id: video_dict}`` mapping already loaded
+    from ``VIDEOS_JSON``) to avoid the full read-modify-write cycle when updating
+    many videos in a loop.  The caller is responsible for flushing the cache to
+    disk via :func:`flush_videos_cache` when done.
+    """
+    if _videos_cache is not None:
+        v = _videos_cache.get(video_id)
+        if v is not None:
+            v["status"] = status.value
+            if status == VideoStatus.PROCESSED:
+                v["processed_date"] = today_str()
+            if publish_date and not v.get("publish_date"):
+                v["publish_date"] = publish_date
+        return
+
     all_vids = load_json(VIDEOS_JSON)
     for v in all_vids:
         if v["video_id"] == video_id:
@@ -646,6 +642,21 @@ def update_video_status(
                 v["publish_date"] = publish_date
             break
     save_json(VIDEOS_JSON, all_vids)
+
+
+def load_videos_cache() -> dict[str, dict]:
+    """Load videos.json into an in-memory ``{video_id: video_dict}`` mapping.
+
+    Use together with :func:`update_video_status` (passing ``_videos_cache``) and
+    :func:`flush_videos_cache` to batch-update many videos with a single read and
+    a single write instead of one read-modify-write per video.
+    """
+    return {v["video_id"]: v for v in load_json(VIDEOS_JSON)}
+
+
+def flush_videos_cache(cache: dict[str, dict]) -> None:
+    """Write an in-memory videos cache back to ``VIDEOS_JSON``."""
+    save_json(VIDEOS_JSON, list(cache.values()))
 
 
 if __name__ == "__main__":
