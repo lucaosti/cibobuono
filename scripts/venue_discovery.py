@@ -22,9 +22,7 @@ from scripts.extract_locales import (
     _normalize_rating,
     _normalize_sentiment,
 )
-from scripts.extract_pipeline import CONF_RULE_VISIT, CONF_BATCH_VISIT
-
-CONF_CHAPTER_HINT = 0.88  # chapter title confirms the visit — higher than batch-LLM alone
+from scripts.utils import CONF_RULE_VISIT, CONF_BATCH_VISIT, CONF_CHAPTER_HINT
 from scripts.utils import setup_logging
 
 if TYPE_CHECKING:

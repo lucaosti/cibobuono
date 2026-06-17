@@ -29,7 +29,7 @@ from scripts.extract_locales import (
     _normalize_sentiment,
     get_llm,
 )
-from scripts.utils import CONFIDENCE_THRESHOLD
+from scripts.utils import CONFIDENCE_THRESHOLD, CONF_RULE_VISIT, CONF_BATCH_VISIT, CONF_CHAPTER_HINT
 from scripts.ner_candidates import Candidate, extract_all_chunks_candidates
 from scripts.utils import setup_logging
 from scripts.venue_discovery import discover_venues_llm
@@ -48,11 +48,9 @@ logger = setup_logging("extract_pipeline")
 
 DEFAULT_BATCH_SIZE = 10
 
-# Confidence ceilings and thresholds used across the NER → classification → merge pipeline.
-# Kept as module constants so callers see the same values without hunting for literals.
-CONF_RULE_VISIT = 0.82        # confidence assigned to rule-confirmed visit candidates
-CONF_BATCH_VISIT = 0.85       # batch-LLM confirmed visit
-CONF_BATCH_MENTION = 0.72     # batch-LLM confirmed mention (may still be flagged if NER high)
+# Confidence thresholds — canonical values live in utils.py; re-exported here
+# so callers that already import from extract_pipeline keep working.
+CONF_BATCH_MENTION = 0.72     # batch-LLM confirmed mention (may still be flagged if NER score low)
 NER_FLAG_SCORE_MIN = 0.42     # NER score floor to flag low-confidence mentions
 FUZZY_DEDUP_RATIO = 88        # thefuzz ratio threshold for near-duplicate name merge
 
