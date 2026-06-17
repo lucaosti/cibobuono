@@ -22,6 +22,9 @@ from scripts.extract_locales import (
     _normalize_rating,
     _normalize_sentiment,
 )
+from scripts.extract_pipeline import CONF_RULE_VISIT, CONF_BATCH_VISIT
+
+CONF_CHAPTER_HINT = 0.88  # chapter title confirms the visit — higher than batch-LLM alone
 from scripts.utils import setup_logging
 
 if TYPE_CHECKING:
@@ -249,16 +252,16 @@ def discover_venues_llm(
         if mention_time is None:
             mention_time = 0.0
 
-        conf = 0.82
+        conf = CONF_RULE_VISIT
         if video_intel:
             for h in video_intel.venue_hints or []:
                 hn = (h.get("name") or "").lower()
                 if hn and (hn in name.lower() or name.lower() in hn):
                     src = h.get("source", "")
                     if src == "chapter":
-                        conf = 0.88
+                        conf = CONF_CHAPTER_HINT
                     elif src in ("title", "description_timestamp"):
-                        conf = 0.85
+                        conf = CONF_BATCH_VISIT
                     break
 
         cat = item.get("category")

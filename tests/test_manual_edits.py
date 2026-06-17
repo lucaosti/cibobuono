@@ -24,7 +24,7 @@ def test_remove_visit(tmp_path, monkeypatch):
 
     ok, msg = remove_visit("visit_v1_100", hide_locale=True, reason="test")
     assert ok is True
-    assert "nascosto" in msg
+    assert "hidden" in msg
     left = json.loads(vpath.read_text())
     assert left == []
 

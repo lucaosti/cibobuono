@@ -17,6 +17,7 @@ from scripts.utils import (
     VISITS_JSON,
     load_json,
     save_json,
+    save_json_split,
     setup_logging,
     today_str,
 )
@@ -167,8 +168,8 @@ def process_reviewed_segments() -> tuple[int, int]:
         updated_segments.append(segment)
 
     save_json(FLAGGED_SEGMENTS_JSON, updated_segments)
-    save_json(LOCALES_JSON, locales)
-    save_json(VISITS_JSON, visits)
+    save_json_split(LOCALES_JSON, locales)
+    save_json_split(VISITS_JSON, visits)
 
     logger.info(f"Review complete: {locales_created} locales created, {visits_created} visits created")
     return locales_created, visits_created
