@@ -1,1 +1,15 @@
-[]
+[
+  {
+    "locale_id": "locale_8d2ee47a80b6",
+    "name": "Panificio Fiore",
+    "aliases": [],
+    "address": "Panificio Fiore, 38, Strada Palazzo di Città, San Nicola, Municipio 1, Bari, Puglia, 70122, Italia",
+    "city": "CENTOCELLE",
+    "lat": 41.1297,
+    "lon": 16.8709,
+    "category": [
+      "panificio"
+    ],
+    "google_maps_url": "https://www.google.com/maps/search/?api=1&query=Panificio+Fiore%2C+CENTOCELLE"
+  }
+]

@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "visit_id": "visit_vxsehTvyfNs_589",
+    "locale_id": "locale_8d2ee47a80b6",
+    "video_id": "vxsehTvyfNs",
+    "channel_id": "franchinoercriminale",
+    "timestamp_start": "9:49",
+    "timestamp_end": "11:19",
+    "youtube_url": "https://youtu.be/vxsehTvyfNs?t=589",
+    "rating": "8",
+    "sentiment": "positive",
+    "rubrica": "Forni criminali",
+    "notes": "Considerando che 10 lo lasciamo a Panificio Fiore A Santa Rita A Bari | Focaccia stile barese da 9,5, parigina da 8, prezzi non specificati",
+    "llm_confidence": 0.79,
+    "extraction_date": "2026-06-17",
+    "date": "2026-06-12"
+  }
+]

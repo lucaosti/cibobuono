@@ -1,1 +1,77 @@
-[]
+[
+  {
+    "video_id": "zYE6gyTO9Mw",
+    "channel_id": "franchinoercriminale",
+    "timestamp_start": "1:50",
+    "timestamp_end": "3:20",
+    "youtube_url": "https://youtu.be/zYE6gyTO9Mw?t=110",
+    "reason": "geocoding_failed",
+    "extracted_text": "Viasagno",
+    "llm_confidence": 0.0,
+    "reviewed_by_human": false,
+    "reviewed_date": null,
+    "locale_name": "Viasagno",
+    "rating": null,
+    "city": ""
+  },
+  {
+    "video_id": "zYE6gyTO9Mw",
+    "channel_id": "franchinoercriminale",
+    "timestamp_start": "1:22",
+    "timestamp_end": "2:52",
+    "youtube_url": "https://youtu.be/zYE6gyTO9Mw?t=82",
+    "reason": "osm_not_found",
+    "extracted_text": "VIA SANNIO",
+    "llm_confidence": 0.0,
+    "reviewed_by_human": false,
+    "reviewed_date": null,
+    "locale_name": "VIA SANNIO",
+    "rating": null,
+    "city": ""
+  },
+  {
+    "video_id": "vxsehTvyfNs",
+    "channel_id": "franchinoercriminale",
+    "timestamp_start": "4:24",
+    "timestamp_end": "5:16",
+    "youtube_url": "https://youtu.be/vxsehTvyfNs?t=264",
+    "reason": "possible_locale_mention_low_confidence",
+    "extracted_text": "New Bakery",
+    "llm_confidence": 0.28,
+    "reviewed_by_human": false,
+    "reviewed_date": null,
+    "locale_name": "New Bakery",
+    "rating": null,
+    "city": ""
+  },
+  {
+    "video_id": "vxsehTvyfNs",
+    "channel_id": "franchinoercriminale",
+    "timestamp_start": "0:02",
+    "timestamp_end": "1:32",
+    "youtube_url": "https://youtu.be/vxsehTvyfNs?t=2",
+    "reason": "osm_not_found",
+    "extracted_text": "Uniclo",
+    "llm_confidence": 0.0,
+    "reviewed_by_human": false,
+    "reviewed_date": null,
+    "locale_name": "Uniclo",
+    "rating": null,
+    "city": "CENTOCELLE"
+  },
+  {
+    "video_id": "vxsehTvyfNs",
+    "channel_id": "franchinoercriminale",
+    "timestamp_start": "2:44",
+    "timestamp_end": "4:14",
+    "youtube_url": "https://youtu.be/vxsehTvyfNs?t=164",
+    "reason": "osm_not_found",
+    "extracted_text": "Forno Sor Franchino",
+    "llm_confidence": 0.0,
+    "reviewed_by_human": false,
+    "reviewed_date": null,
+    "locale_name": "Forno Sor Franchino",
+    "rating": null,
+    "city": "CENTOCELLE"
+  }
+]
