@@ -122,7 +122,7 @@ class _Handler(BaseHTTPRequestHandler):
                 elif action == "stop":
                     ok, msg = request_stop()
                 else:
-                    self._json({"error": "Azione sconosciuta"}, status=400)
+                    self._json({"error": "Unknown action"}, status=400)
                     return
                 self._json({"ok": ok, "message": msg, "control": sync_status()})
             except Exception as e:
@@ -235,8 +235,8 @@ def main() -> None:
         raise SystemExit(f"Missing dashboard UI: {_STATIC_HTML}")
 
     snap = DASHBOARD_SNAPSHOT_PATH
-    print(f"Dashboard web su http://{args.host}:{args.port}/")
-    print(f"Snapshot: {snap} ({'presente' if snap.exists() else 'assente'})")
+    print(f"Dashboard web at http://{args.host}:{args.port}/")
+    print(f"Snapshot: {snap} ({'found' if snap.exists() else 'missing'})")
     server = ThreadingHTTPServer((args.host, args.port), _Handler)
     try:
         server.serve_forever()
