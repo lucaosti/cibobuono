@@ -203,7 +203,6 @@ def start_pipeline(*, max_videos: int = 0) -> tuple[bool, str]:
         sys.executable,
         "-m",
         "scripts.run_pipeline",
-        "--skip-push",
         "--no-dashboard",
         "--max-videos",
         str(int(max_videos)),

@@ -28,8 +28,9 @@ Two-phase design:
       15. GitHub Actions builds React site and deploys to Pages
 
 Usage:
-    python -m scripts.run_pipeline --skip-push --max-videos 10
-    python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
+    python -m scripts.run_pipeline --max-videos 10
+    python -m scripts.run_pipeline --reset --max-videos 0 --no-dashboard
+    python -m scripts.run_pipeline --push --max-videos 10   # also commit+push data to GitHub
 """
 
 from __future__ import annotations
@@ -143,7 +144,7 @@ def run_pipeline(
     skip_fetch: bool = False,
     skip_transcribe: bool = False,
     skip_extract: bool = False,
-    skip_push: bool = False,
+    skip_push: bool = True,
     whisper_model: str = WHISPER_DEFAULT_MODEL,
     max_videos: int = 100,
     no_dashboard: bool = False,
@@ -158,7 +159,7 @@ def run_pipeline(
         skip_fetch: Skip cataloging new videos (work only on existing pending)
         skip_transcribe: Skip transcription (use cached transcripts)
         skip_extract: Skip LLM extraction (useful for testing geocoding/dedup)
-        skip_push: Skip git commit and push
+        skip_push: Skip git commit and push (default True — pass --push to enable)
         whisper_model: Whisper model size (tiny, base, small, medium, large)
         max_videos: Max pending videos to process in this run (0 = all pending)
         no_dashboard: Disable live dashboard (log-only mode)
@@ -857,7 +858,7 @@ def run_pipeline(
             else:
                 _log("No data changes — git push skipped")
         else:
-            _log("Git push skipped (--skip-push)")
+            _log("Git push skipped (use --push to enable)")
 
         dash.set_phase("Complete ✓")
         _refresh_stats()
@@ -964,7 +965,7 @@ def run_pipeline_watch(
     skip_fetch: bool = False,
     skip_transcribe: bool = False,
     skip_extract: bool = False,
-    skip_push: bool = False,
+    skip_push: bool = True,
     whisper_model: str = WHISPER_DEFAULT_MODEL,
     max_videos: int = 100,
     auto_models: bool = True,
@@ -1122,8 +1123,8 @@ def main():
         help="Skip LLM extraction",
     )
     parser.add_argument(
-        "--skip-push", action="store_true",
-        help="Skip git commit and push",
+        "--push", action="store_true",
+        help="Commit and push data/*.json to GitHub after the run (default: off)",
     )
     parser.add_argument(
         "--whisper-model", default=None,
@@ -1222,7 +1223,7 @@ def main():
             skip_fetch=args.skip_fetch,
             skip_transcribe=args.skip_transcribe,
             skip_extract=args.skip_extract,
-            skip_push=args.skip_push,
+            skip_push=not args.push,
             whisper_model=args.whisper_model or WHISPER_DEFAULT_MODEL,
             max_videos=args.max_videos,
             auto_models=not args.no_auto_models,
@@ -1233,7 +1234,7 @@ def main():
         skip_fetch=args.skip_fetch,
         skip_transcribe=args.skip_transcribe,
         skip_extract=args.skip_extract,
-        skip_push=args.skip_push,
+        skip_push=not args.push,
         whisper_model=args.whisper_model or WHISPER_DEFAULT_MODEL,
         max_videos=args.max_videos,
         no_dashboard=args.no_dashboard,
