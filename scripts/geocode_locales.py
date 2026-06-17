@@ -33,7 +33,6 @@ _KNOWN_CITIES: frozenset[str] = frozenset({
     "Cosenza", "Catanzaro", "Reggio Emilia", "Prato", "Livorno", "Pisa",
     "Arezzo", "Siena", "Grosseto", "Lucca", "Pistoia", "Massa", "Carrara",
     "Berlino", "Parigi", "Londra", "Madrid", "New York", "Tokyo", "Osaka",
-    "Napoli", "Berlino",
 })
 _ROMAN_NEIGHBORHOODS: frozenset[str] = frozenset({
     "Centocelle", "Pigneto", "Testaccio", "Trastevere", "Ostiense", "Prati",

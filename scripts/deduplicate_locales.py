@@ -20,6 +20,8 @@ import math
 import re
 from urllib.parse import quote_plus
 
+from thefuzz import fuzz
+
 from scripts.utils import (
     DEDUP_DISTANCE_METERS,
     DEDUP_NAME_SIMILARITY_THRESHOLD,
@@ -79,12 +81,6 @@ def name_similarity(name1: str, name2: str) -> int:
 
     Returns score 0-100.
     """
-    try:
-        from thefuzz import fuzz
-    except ImportError:
-        logger.error("thefuzz not installed. Install with: pip install 'thefuzz[speedup]'")
-        return 100 if name1.lower().strip() == name2.lower().strip() else 0
-
     n1 = _normalize_for_dedup(name1)
     n2 = _normalize_for_dedup(name2)
 
@@ -166,7 +162,6 @@ def merge_locale(existing: dict, new_data: dict) -> dict:
         # alias detection.  The heavy noise-word-stripping similarity used for
         # dedup is too aggressive here ("Panificio Rossi" ≠ "Forno Rossi" as
         # display names even though they represent the same business).
-        from thefuzz import fuzz
         is_known = any(
             fuzz.ratio(new_name.lower().strip(), n.lower().strip()) >= 90
             for n in all_names

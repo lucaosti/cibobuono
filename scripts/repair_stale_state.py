@@ -14,7 +14,7 @@ __author__ = "Luca Ostinelli"
 import argparse
 from collections import defaultdict
 
-from scripts.fetch_videos import update_video_status
+from scripts.fetch_videos import update_video_status, load_videos_cache, flush_videos_cache
 from scripts.populate_json import update_processed_videos
 from scripts.schemas import VideoStatus
 from scripts.utils import (
@@ -55,6 +55,8 @@ def repair_stale_video_state(dry_run: bool = False) -> dict:
     processed_ids = {p.get("video_id") for p in processed if p.get("video_id")}
     repaired: list[str] = []
 
+    videos_cache = None if dry_run else load_videos_cache()
+
     for entry in videos:
         if entry.get("status") != VideoStatus.PENDING.value:
             continue
@@ -77,7 +79,7 @@ def repair_stale_video_state(dry_run: bool = False) -> dict:
             )
             continue
 
-        update_video_status(video_id, VideoStatus.PROCESSED, publish_date)
+        update_video_status(video_id, VideoStatus.PROCESSED, publish_date, _videos_cache=videos_cache)
         if video_id not in processed_ids:
             update_processed_videos(
                 video_id,
@@ -91,6 +93,9 @@ def repair_stale_video_state(dry_run: bool = False) -> dict:
             f"Repaired stale state for {video_id} "
             f"(visits={n_vis}, flagged={n_flag})"
         )
+
+    if videos_cache is not None and repaired:
+        flush_videos_cache(videos_cache)
 
     return {
         "dry_run": dry_run,
