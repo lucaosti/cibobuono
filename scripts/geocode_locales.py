@@ -179,8 +179,6 @@ def geocode_locale(
     if city:
         queries.append(f"{name}, {city}, {country}")
     queries.append(f"{name}, {country}")
-    if city:
-        queries.append(f"{city}, {country}")
 
     for query in queries:
         try:

@@ -295,7 +295,7 @@ def _food_llm_check(
                 {"role": "user", "content": user_msg},
             ],
             max_tokens=20,
-            temperature=0.05,
+            temperature=0.0,
             stop=["\n"],
         )
         answer = response["choices"][0]["message"]["content"].strip().upper()

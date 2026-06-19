@@ -200,8 +200,11 @@ def classify_with_llm(
                 {"role": "user", "content": user_msg},
             ],
             max_tokens=min(180, LLM_MAX_TOKENS),
-            temperature=LLM_TEMPERATURE,
-            stop=["```", "\n\n\n"],
+            # Binary classification: greedy decoding (temp=0) outperforms sampling
+            # for short, deterministic answers (Wang et al., 2023).
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            stop=["```"],
         )
         out = response["choices"][0]["message"]["content"].strip()
         data = _parse_llm_visit_json(out)
@@ -216,24 +219,27 @@ def classify_with_llm(
         return False, "", 0.4
 
 
-# Words that are NEVER a venue proper name (dishes, ingredients, generic terms).
-# Used to reject false positives before the (expensive) visit classification.
-NON_VENUE_TERMS = frozenset({
-    # dishes / food
-    "pizza", "pasta", "carbonara", "amatriciana", "gricia", "cacio", "pepe",
-    "maritozzo", "cornetto", "gelato", "tiramisu", "tiramisù", "supplì", "suppli",
-    "arancino", "arancina", "trapizzino", "panzerotto", "porchetta", "montanara",
-    "parmigiana", "lasagna", "lasagne", "gnocco", "pinsa", "focaccia", "calzone",
-    "cannolo", "cannoli", "panino", "hamburger", "burger", "kebab", "ramen",
-    "sushi", "bistecca", "tartare", "crudo", "mozzarella", "burrata", "prosciutto",
-    "salame", "vino", "birra", "caffè", "caffe", "espresso", "cappuccino",
+# Additional non-venue terms not already covered by FOOD_LEXICON.
+# NON_VENUE_TERMS is the authoritative rejection set; it is defined as
+# FOOD_LEXICON | _NON_VENUE_EXTRA so the two sets stay in sync automatically.
+_NON_VENUE_EXTRA = frozenset({
+    # food variants / drinks not in FOOD_LEXICON
+    "supplì", "lasagna", "lasagne", "cannoli", "espresso", "cappuccino", "dessert",
+    # beef types
     "wagyu", "kobe", "allevati", "manzo", "carne",
-    "menu", "antipasto", "primo", "secondo", "contorno", "dolce", "dessert",
-    # generic / filler
+    # quality adjectives
     "buono", "buonissimo", "ottimo", "delizioso", "fantastico", "spettacolare",
-    "ragazzi", "amici", "video", "canale", "puntata", "oggi", "qui", "qua",
+    # vlog meta words
+    "ragazzi", "amici", "video", "canale", "puntata",
+    # temporal / locative fillers
+    "oggi", "qui", "qua",
+    # countries / major cities (not venue names)
     "italia", "italiano", "italiana", "roma", "milano", "napoli", "torino",
 })
+
+# Words that are NEVER a venue proper name (dishes, ingredients, generic terms).
+# Derived from FOOD_LEXICON so additions to either set stay consistent.
+NON_VENUE_TERMS: frozenset[str] = FOOD_LEXICON | _NON_VENUE_EXTRA
 
 
 def _looks_like_venue_name(name: str) -> bool:
@@ -291,7 +297,8 @@ def verify_venue_name(llm, name: str, window_text: str) -> bool:
             ],
             max_tokens=30,
             temperature=0.0,
-            stop=["```", "\n\n"],
+            response_format={"type": "json_object"},
+            stop=["```"],
         )
         out = response["choices"][0]["message"]["content"].strip()
         data = _parse_llm_visit_json(out.replace("is_venue", "visit")) or {}

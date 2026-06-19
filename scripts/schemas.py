@@ -204,7 +204,7 @@ class FlaggedSegment(BaseModel):
 class CorrectionOverrides(BaseModel):
     name: Optional[str] = Field(default=None)
     city: Optional[str] = Field(default=None)
-    rating: Optional[float] = Field(default=None)
+    rating: Optional[str] = Field(default=None, description="Override rating (e.g. '8', '8--', '6++'); same format as Visit.rating")
     sentiment: Optional[Sentiment] = Field(default=None)
 
 
