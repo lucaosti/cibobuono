@@ -222,7 +222,8 @@ def discover_venues_llm(
             ],
             max_tokens=min(1200, LLM_MAX_TOKENS),
             temperature=LLM_TEMPERATURE,
-            stop=["```", "\n\n\n"],
+            response_format={"type": "json_object"},
+            stop=["```"],
         )
         out = response["choices"][0]["message"]["content"].strip()
     except Exception as e:

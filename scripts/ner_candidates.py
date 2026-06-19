@@ -34,18 +34,20 @@ def _refine_candidate_text(raw: str) -> str:
     s = _VENUE_PREFIX.sub("", s).strip()
     return s
 
-# GLiNER labels — broad semantic phrases so the model generalises to venue types
-# not explicitly listed (taverna, kebabbaro, focacceria, etc.).  Fewer labels
-# also speed up GLiNER inference.  The LLM validation step downstream filters
-# false positives, so higher recall here is more important than precision.
+# GLiNER labels — definition-enriched descriptions following Zaratiana et al. (2023)
+# and SLIMER-IT (CLiC-it 2024): adding brief entity definitions improves zero-shot
+# recall by +23.75 F1 on unseen entity types vs bare category names.
+# Labels remain broad so the model generalises to venue types not explicitly listed
+# (taverna, kebabbaro, focacceria, etc.).  The LLM downstream filters false positives,
+# so higher recall here is more important than precision.
 NER_LABELS = [
-    # Venue labels (5 broad categories)
-    "restaurant, trattoria, osteria or food venue",
-    "pizzeria",
-    "bakery, pastry shop or gelateria",
-    "bar, cafe, wine bar or enoteca",
-    "street food stall, rosticceria, friggitoria or food market",
-    # Context labels (unchanged)
+    # Venue labels — definition-enriched for GLiNER x-large zero-shot performance
+    "restaurant, trattoria, osteria or food venue: proper name of a sit-down eating place visited on location",
+    "pizzeria: proper name of a pizza restaurant or pizza-by-the-slice shop visited on location",
+    "bakery, pastry shop or gelateria: proper name of a forno, panificio, pasticceria, or gelato shop visited on location",
+    "bar, cafe, wine bar or enoteca: proper name of a bar, coffee shop, or wine bar visited on location",
+    "street food stall, rosticceria, friggitoria or food market: proper name of a street food vendor, market stall, or take-away food shop visited on location",
+    # Context labels — used to blacklist false-positive venue candidates
     "city",
     "neighborhood",
     "country",
@@ -55,11 +57,11 @@ NER_LABELS = [
 ]
 
 VENUE_LABELS = frozenset({
-    "restaurant, trattoria, osteria or food venue",
-    "pizzeria",
-    "bakery, pastry shop or gelateria",
-    "bar, cafe, wine bar or enoteca",
-    "street food stall, rosticceria, friggitoria or food market",
+    "restaurant, trattoria, osteria or food venue: proper name of a sit-down eating place visited on location",
+    "pizzeria: proper name of a pizza restaurant or pizza-by-the-slice shop visited on location",
+    "bakery, pastry shop or gelateria: proper name of a forno, panificio, pasticceria, or gelato shop visited on location",
+    "bar, cafe, wine bar or enoteca: proper name of a bar, coffee shop, or wine bar visited on location",
+    "street food stall, rosticceria, friggitoria or food market: proper name of a street food vendor, market stall, or take-away food shop visited on location",
 })
 
 CONTEXT_LABELS = frozenset({
@@ -307,7 +309,13 @@ def extract_chunk_candidates(
 
     if model is not None:
         try:
-            with _gliner_predict_lock:
+            # Serialize GPU inference to avoid CUDA race conditions.
+            # CPU inference (Apple Silicon Metal / pure CPU) is thread-safe in
+            # PyTorch (GIL released for tensor ops), so no lock needed there.
+            if not _gliner_use_cpu():
+                with _gliner_predict_lock:
+                    raw = model.predict_entities(text, NER_LABELS, threshold=threshold)
+            else:
                 raw = model.predict_entities(text, NER_LABELS, threshold=threshold)
         except Exception as e:
             logger.warning(f"GLiNER predict failed: {e}")

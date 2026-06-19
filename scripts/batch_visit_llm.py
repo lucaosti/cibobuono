@@ -104,8 +104,11 @@ def batch_evaluate_candidates(
                     {"role": "user", "content": user_msg},
                 ],
                 max_tokens=min(900, LLM_MAX_TOKENS),
-                temperature=LLM_TEMPERATURE,
-                stop=["```", "\n\n\n"],
+                # Binary classification: greedy decoding reduces hallucination vs
+                # sampling (Wang et al., 2023 — Self-Consistency).
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                stop=["```"],
             )
             raw = response["choices"][0]["message"]["content"].strip()
         except Exception as e:
@@ -116,10 +119,17 @@ def batch_evaluate_candidates(
         for it in batch:
             cid = str(it["id"])
             row = by_id.get(cid, {})
+            is_visit = bool(row.get("is_visit"))
+            evidence = str(row.get("evidence") or "").strip()[:500]
+            # Hallucination guard: a genuine on-site visit must have citeable evidence.
+            # Empty evidence with is_visit=true is a model artefact; demote to False.
+            if is_visit and len(evidence) < 5:
+                logger.debug("Batch LLM: demoting is_visit=true (no evidence) for id=%s", cid)
+                is_visit = False
             out[cid] = BatchEvalResult(
                 is_venue=bool(row.get("is_venue")),
-                is_visit=bool(row.get("is_visit")),
-                evidence=str(row.get("evidence") or "")[:500],
+                is_visit=is_visit,
+                evidence=evidence,
             )
 
     return out

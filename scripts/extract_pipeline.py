@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from thefuzz import fuzz
 
-from scripts.batch_visit_llm import BatchEvalResult, batch_evaluate_candidates
+from scripts.batch_visit_llm import BatchEvalResult, DEFAULT_BATCH_SIZE, batch_evaluate_candidates
 from scripts.chunk_transcription import seconds_to_timestamp
 from scripts.extract_locales import (
     LLM_MAX_TOKENS,
@@ -46,13 +46,17 @@ if TYPE_CHECKING:
 
 logger = setup_logging("extract_pipeline")
 
-DEFAULT_BATCH_SIZE = 10
-
 # Confidence thresholds — canonical values live in utils.py; re-exported here
 # so callers that already import from extract_pipeline keep working.
 CONF_BATCH_MENTION = 0.72     # batch-LLM confirmed mention (may still be flagged if NER score low)
 NER_FLAG_SCORE_MIN = 0.42     # NER score floor to flag low-confidence mentions
 FUZZY_DEDUP_RATIO = 88        # thefuzz ratio threshold for near-duplicate name merge
+
+# Confidence interpolation weights: blend classifier confidence with NER span score.
+# Classifier signal dominates (0.65) since it uses full context; NER score contributes
+# quality of the span itself.  Sum must equal 1.0.
+_CONF_CLASSIFIER_WEIGHT = 0.65
+_CONF_NER_WEIGHT = 0.35
 
 
 def _batch_llm_enabled() -> bool:
@@ -93,15 +97,16 @@ def _normalize_name(name: str) -> str:
 
 
 def _label_to_category(label: str) -> list[str]:
-    label = label.lower().strip()
-    if label == "bakery":
+    # Use substring matching: GLiNER labels may include a definition suffix after ":".
+    label = label.lower().split(":")[0].strip()
+    if "bakery" in label or "pastry" in label or "gelateria" in label:
         return ["panificio", "forno"]
-    if label == "bar or cafe":
+    if "bar" in label or "cafe" in label or "enoteca" in label:
         return ["bar", "caffe"]
-    if label == "street food stall":
+    if "street food" in label or "rosticceria" in label or "friggitoria" in label:
         return ["street_food"]
-    if label == "food market":
-        return ["mercato"]
+    if "pizzeria" in label:
+        return ["pizzeria"]
     return ["ristorante"]
 
 
@@ -178,7 +183,8 @@ def _detail_llm(
             ],
             max_tokens=min(400, LLM_MAX_TOKENS),
             temperature=LLM_TEMPERATURE,
-            stop=["```", "\n\n\n"],
+            response_format={"type": "json_object"},
+            stop=["```"],
         )
         out = response["choices"][0]["message"]["content"].strip()
         data = _parse_detail_json(out)
@@ -190,7 +196,9 @@ def _detail_llm(
 
 def _visit_confidence(conf: float, ner_score: float, src: str) -> float:
     bonus = 0.08 if src == "rule" else 0.05 if src == "llm" else 0.0
-    return _norm_confidence(min(1.0, conf * 0.65 + ner_score * 0.35 + bonus))
+    return _norm_confidence(
+        min(1.0, conf * _CONF_CLASSIFIER_WEIGHT + ner_score * _CONF_NER_WEIGHT + bonus)
+    )
 
 
 def _promote_venue_hints(
