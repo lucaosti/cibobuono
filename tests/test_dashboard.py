@@ -89,32 +89,23 @@ def test_load_snapshot_missing_returns_none(tmp_path: Path, monkeypatch: pytest.
     assert Dashboard.load_snapshot() is None
 
 
-def test_build_web_state_hides_stale_run(dash: Dashboard, monkeypatch: pytest.MonkeyPatch):
-    from scripts.dashboard import build_web_state
-
-    monkeypatch.setattr(
-        "scripts.dashboard.compute_live_stats",
-        lambda: {
-            "channels": 1, "total_videos": 2, "pending": 1, "processed": 1,
-            "skipped": 0, "errored": 0, "locales_in_db": 1,
-            "visits_in_db": 0, "flagged_in_db": 0,
-        },
+def test_set_perception_flows_into_snapshot(dash: Dashboard):
+    dash.update_video(1, "Perception video", video_id="vidp")
+    dash.set_perception(
+        perc_status="ok",
+        speakers_count=2,
+        voice_matches=["S0→voice_UCx_001 (0.83)"],
+        frames_sampled=410,
+        novelty_frames=57,
+        captions_count=57,
+        sample_captions=["Sign reading 'Trattoria da Mario'"],
     )
-    monkeypatch.setattr("scripts.dashboard._database_locales_with_confidence", lambda limit=50: [])
-
-    stale = {"phase": "Complete ✓", "stats": {"pending": 99}, "run_locales": [{"name": "old"}]}
-    idle = build_web_state(stale, pipeline_running=False)
-    assert idle["phase"] == "Idle"
-    assert idle["stats"]["pending"] == 1
-    assert idle["run_locales"] == []
-    assert idle["stale_snapshot"] is True
-
-    clean = build_web_state({"phase": "Idle", "stats": {}}, pipeline_running=False)
-    assert clean["stale_snapshot"] is False
-
-    live = build_web_state(stale, pipeline_running=True)
-    assert live["phase"] == "Complete ✓"
-    assert len(live["run_locales"]) == 1
+    src = dash.to_snapshot_dict()["current_video"]["sources"]
+    assert src["perc_status"] == "ok"
+    assert src["speakers_count"] == 2
+    assert src["novelty_frames"] == 57
+    assert src["voice_matches"] == ["S0→voice_UCx_001 (0.83)"]
+    assert src["sample_captions"][0].startswith("Sign reading")
 
 
 def test_reset_to_idle_clears_run_state(dash: Dashboard):

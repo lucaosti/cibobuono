@@ -120,6 +120,48 @@ class TestAppleSilicon:
         assert p.n_batch == 2048
         assert p.n_ctx == 8192
 
+    def test_m_class_32gb_perceptor_uses_mlx(self, monkeypatch):
+        _force_platform(
+            monkeypatch, system="Darwin", machine="arm64",
+            cpu_logical=12, cpu_physical=12, ram_gb=32.0,
+        )
+        monkeypatch.setattr(
+            hardware, "_detect_apple_silicon_cores", lambda: (8, 4)
+        )
+        _stub_no_gpu(monkeypatch)
+        _stub_no_pi(monkeypatch)
+        _stub_no_virt(monkeypatch)
+        monkeypatch.setattr(hardware, "_find_spec", lambda name: True)
+
+        p = get_profile()
+
+        assert p.has_mlx is True
+        assert p.asr_backend == "mlx_whisper"
+        assert p.vlm_backend == "mlx_vlm"
+        assert p.vlm_model == "mlx-community/Qwen2-VL-2B-Instruct-4bit"
+        assert p.frame_interval_s == 3.0
+        assert p.caption_budget == 120
+
+    def test_apple_silicon_without_mlx_falls_back(self, monkeypatch):
+        _force_platform(
+            monkeypatch, system="Darwin", machine="arm64",
+            cpu_logical=12, cpu_physical=12, ram_gb=32.0,
+        )
+        monkeypatch.setattr(
+            hardware, "_detect_apple_silicon_cores", lambda: (8, 4)
+        )
+        _stub_no_gpu(monkeypatch)
+        _stub_no_pi(monkeypatch)
+        _stub_no_virt(monkeypatch)
+        monkeypatch.setattr(hardware, "_find_spec", lambda name: False)
+
+        p = get_profile()
+
+        assert p.has_mlx is False
+        assert p.asr_backend == "faster_whisper"
+        assert p.vlm_backend == "none"
+        assert p.caption_budget == 0
+
 
 # ---------------------------------------------------------------------------
 # Linux + NVIDIA CUDA
@@ -173,6 +215,46 @@ class TestLinuxCUDA:
         assert p.whisper_device == "cuda"
         assert p.whisper_compute_type == "int8_float16"
         assert p.n_ctx == 8192  # VRAM < 12 GB → conservative context
+
+    def test_rtx_5080_16gb_perceptor(self, monkeypatch):
+        _force_platform(
+            monkeypatch, system="Linux", machine="x86_64",
+            cpu_logical=24, cpu_physical=12, ram_gb=64.0,
+        )
+        monkeypatch.setattr(
+            hardware, "_detect_cuda",
+            lambda: (True, "NVIDIA GeForce RTX 5080", 16.0),
+        )
+        monkeypatch.setattr(hardware, "_detect_rocm", lambda: (False, None, None))
+        _stub_no_pi(monkeypatch)
+        _stub_no_virt(monkeypatch)
+
+        p = get_profile()
+
+        assert p.asr_backend == "faster_whisper"
+        assert p.whisper_device == "cuda"
+        assert p.whisper_compute_type == "float16"
+        assert p.vlm_backend == "transformers_cuda"
+        assert p.vlm_model == "Qwen/Qwen2-VL-7B-Instruct-AWQ"
+        assert p.frame_interval_s == 2.0
+        assert p.caption_budget == 200
+
+    def test_cpu_only_perceptor_disables_vlm(self, monkeypatch):
+        _force_platform(
+            monkeypatch, system="Linux", machine="x86_64",
+            cpu_logical=8, cpu_physical=4, ram_gb=8.0,
+        )
+        _stub_no_gpu(monkeypatch)
+        _stub_no_pi(monkeypatch)
+        _stub_no_virt(monkeypatch)
+
+        p = get_profile()
+
+        assert p.asr_backend == "faster_whisper"
+        assert p.vlm_backend == "none"
+        assert p.vlm_model == ""
+        assert p.caption_budget == 0
+        assert p.frame_interval_s == 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +485,9 @@ def test_to_dict_is_json_safe():
         n_threads=2, n_gpu_layers=0, n_batch=256, n_ctx=1024,
         use_mlock=False, use_mmap=True,
         llm_tier="none", enable_llm=False,
+        has_mlx=False, asr_backend="faster_whisper",
+        vlm_backend="none", vlm_model="",
+        frame_interval_s=5.0, caption_budget=0,
         detection_notes=("a", "b"),
     )
     blob = json.dumps(profile.to_dict())

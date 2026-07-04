@@ -15,3 +15,7 @@ geopy>=2.4.0
 thefuzz[speedup]>=0.22.0
 rich>=13.0.0
 yt-dlp>=2024.0.0
+
+# Perceptor unit tests (diarization clustering, voice registry math)
+numpy>=1.26.0
+imagehash>=4.3.1

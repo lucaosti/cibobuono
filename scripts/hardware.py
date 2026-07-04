@@ -119,6 +119,14 @@ class DeviceProfile:
     llm_tier: str  # "72B" | "32B" | "14B" | "8B" | "3B" | "1B" | "none"
     enable_llm: bool  # False on very low-end → NER+rules-only extraction
 
+    # Derived: Perceptor (audio/video perception)
+    has_mlx: bool  # Apple Silicon AND mlx-whisper importable
+    asr_backend: str  # "mlx_whisper" | "faster_whisper" | "openai_whisper"
+    vlm_backend: str  # "mlx_vlm" | "transformers_cuda" | "none"
+    vlm_model: str  # HF repo id; "" when vlm_backend == "none"
+    frame_interval_s: float  # seconds between sampled video frames (2.0–5.0)
+    caption_budget: int  # max VLM-captioned frames per video (0 = no VLM)
+
     # Provenance
     detection_notes: tuple[str, ...] = field(default_factory=tuple)
 
@@ -475,6 +483,8 @@ def _derive_params(
     is_virtual: bool,
     gpu_vram_gb: float | None,
     pi_model: str | None,
+    has_mlx_whisper: bool = False,
+    has_mlx_vlm: bool = False,
 ) -> dict:
     """Return a dict of derived runtime params. Values are clamped to safe
     minimums so the pipeline never tries to spawn 0 threads etc."""
@@ -581,7 +591,16 @@ def _derive_params(
     if llm_tier == "none":
         enable_llm = False
 
+    perceptor = _derive_perceptor_params(
+        plat,
+        total_ram_gb=total_ram_gb,
+        gpu_vram_gb=gpu_vram_gb,
+        has_mlx_whisper=has_mlx_whisper,
+        has_mlx_vlm=has_mlx_vlm,
+    )
+
     return dict(
+        **perceptor,
         whisper_device=whisper_device,
         whisper_compute_type=whisper_compute_type,
         whisper_cpu_threads=whisper_cpu_threads,
@@ -595,6 +614,94 @@ def _derive_params(
         llm_tier=llm_tier,
         enable_llm=enable_llm,
     )
+
+
+# ---------------------------------------------------------------------------
+# Perceptor parameter derivation
+# ---------------------------------------------------------------------------
+
+
+# VLM model repos per backend tier. AWQ 7B needs autoawq at runtime; the
+# perceptor VLM adapter falls back to the 2B fp16 repo if loading fails.
+_VLM_MLX_2B = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
+_VLM_CUDA_2B = "Qwen/Qwen2-VL-2B-Instruct"
+_VLM_CUDA_7B_AWQ = "Qwen/Qwen2-VL-7B-Instruct-AWQ"
+
+
+def _derive_perceptor_params(
+    plat: DevicePlatform,
+    *,
+    total_ram_gb: float,
+    gpu_vram_gb: float | None,
+    has_mlx_whisper: bool,
+    has_mlx_vlm: bool,
+) -> dict:
+    """Perceptor (audio/video perception) parameters.
+
+    VAD (Silero) and speaker embeddings (TitaNet) run on CPU via sherpa-onnx
+    on every tier, so only ASR backend, VLM captioning and the frame-sampling
+    density depend on the hardware.
+    """
+    is_cuda = plat in (DevicePlatform.LINUX_CUDA, DevicePlatform.WINDOWS_CUDA)
+    vram = gpu_vram_gb or 0.0
+
+    # ── ASR backend ───────────────────────────────────────────────────────
+    # mlx-whisper uses the Metal GPU on Apple Silicon (~4.3x realtime for
+    # large-v3-turbo on M2 Max vs 1.2x for CTranslate2 on CPU). faster-whisper
+    # stays primary on CUDA (float16) and as the CPU fallback everywhere.
+    if plat == DevicePlatform.APPLE_SILICON and has_mlx_whisper:
+        asr_backend = "mlx_whisper"
+    else:
+        asr_backend = "faster_whisper"
+
+    # ── VLM captioning backend + model ────────────────────────────────────
+    vlm_backend = "none"
+    vlm_model = ""
+    if plat == DevicePlatform.APPLE_SILICON and has_mlx_vlm and total_ram_gb >= 12:
+        vlm_backend = "mlx_vlm"
+        vlm_model = _VLM_MLX_2B
+    elif is_cuda and vram >= 16:
+        vlm_backend = "transformers_cuda"
+        vlm_model = _VLM_CUDA_7B_AWQ
+    elif is_cuda and vram >= 8:
+        vlm_backend = "transformers_cuda"
+        vlm_model = _VLM_CUDA_2B
+
+    # ── Frame sampling density + captioning budget ────────────────────────
+    if is_cuda and vram >= 12:
+        frame_interval_s = 2.0
+    elif plat == DevicePlatform.APPLE_SILICON and total_ram_gb >= 24:
+        frame_interval_s = 3.0
+    elif total_ram_gb >= 16:
+        frame_interval_s = 4.0
+    else:
+        frame_interval_s = 5.0
+
+    if vlm_backend == "none":
+        caption_budget = 0
+    elif vlm_backend == "transformers_cuda":
+        caption_budget = 200
+    else:  # mlx_vlm
+        caption_budget = 120
+
+    return dict(
+        has_mlx=has_mlx_whisper and plat == DevicePlatform.APPLE_SILICON,
+        asr_backend=asr_backend,
+        vlm_backend=vlm_backend,
+        vlm_model=vlm_model,
+        frame_interval_s=frame_interval_s,
+        caption_budget=caption_budget,
+    )
+
+
+def _find_spec(module: str) -> bool:
+    """True when *module* is importable, without importing it."""
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +792,12 @@ def get_profile() -> DeviceProfile:
     # Platform classification
     plat = _classify_platform(system, machine, has_cuda, has_rocm, pi_model)
 
+    # Perceptor backends (Apple Silicon only; find_spec avoids the import cost)
+    has_mlx_whisper = has_metal and _find_spec("mlx_whisper")
+    has_mlx_vlm = has_metal and _find_spec("mlx_vlm")
+    if has_mlx_whisper:
+        notes.append("mlx_whisper")
+
     # Derived params
     derived = _derive_params(
         plat,
@@ -695,6 +808,8 @@ def get_profile() -> DeviceProfile:
         is_virtual=is_virtual,
         gpu_vram_gb=gpu_vram_gb,
         pi_model=pi_model,
+        has_mlx_whisper=has_mlx_whisper,
+        has_mlx_vlm=has_mlx_vlm,
     )
 
     profile = DeviceProfile(

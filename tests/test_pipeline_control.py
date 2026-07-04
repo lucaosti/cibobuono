@@ -14,31 +14,7 @@ def ctrl_env(tmp_path, monkeypatch):
     monkeypatch.setattr(pc, "CONTROL_PATH", tmp_path / "control.json")
     monkeypatch.setattr(pc, "PID_PATH", tmp_path / "pipeline.pid")
     monkeypatch.setattr(pc, "LOGS_DIR", tmp_path)
-
-    # Redirect every editable file to tmp_path so tests never touch real data.
-    fake_files: dict[str, object] = {}
-    for name in pc.EDITABLE_FILES:
-        dest = tmp_path / name
-        if name.endswith(".txt"):
-            dest.write_text("https://youtube.com/@test\n", encoding="utf-8")
-        else:
-            dest.write_text("[]", encoding="utf-8")
-        fake_files[name] = dest
-    monkeypatch.setattr(pc, "EDITABLE_FILES", fake_files)
     return tmp_path
-
-
-def test_write_and_read_editable_json(ctrl_env, monkeypatch):
-    monkeypatch.setattr(
-        pc,
-        "EDITABLE_FILES",
-        {"locales.json": ctrl_env / "locales.json"},
-    )
-    data = [{"locale_id": "x", "name": "Test"}]
-    pc.write_editable("locales.json", data)
-    loaded, kind = pc.read_editable("locales.json")
-    assert kind == "json"
-    assert loaded == data
 
 
 def test_pause_resume(ctrl_env, monkeypatch):
@@ -55,3 +31,16 @@ def test_pause_resume(ctrl_env, monkeypatch):
 def test_wait_if_paused_unblocks(ctrl_env, monkeypatch):
     pc.write_state({**pc.default_state(), "pause_requested": False})
     assert pc.wait_if_paused() is True
+
+
+def test_cli_status(ctrl_env, capsys):
+    rc = pc.main(["status"])
+    assert rc == 0
+    state = json.loads(capsys.readouterr().out)
+    assert state["status"] == "idle"
+
+
+def test_cli_pause_without_pipeline_fails(ctrl_env, capsys):
+    rc = pc.main(["pause"])
+    assert rc == 1
+    assert "No pipeline running" in capsys.readouterr().out

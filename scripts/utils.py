@@ -288,6 +288,7 @@ def cleanup_cache(max_files: int = MAX_CACHED_VIDEOS) -> list[str]:
             f.parent / f"{stem}_transcript.json",
             f.parent / f"{stem}_metadata.json",
             f.parent / f"{stem}_description.txt",
+            f.parent / f"{stem}_video.mp4",  # Perceptor low-res download
         ]
         for companion in companions:
             if companion.exists():

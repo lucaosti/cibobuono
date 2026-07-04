@@ -1,12 +1,14 @@
 """
-dashboard.py — Live pipeline dashboard (terminal + JSON snapshot for web UI).
+dashboard.py — Live terminal pipeline dashboard (Rich).
 
-Terminal (Rich): run_pipeline with dashboard enabled (default).
-Web: ``python -m scripts.dashboard_web`` reads ``logs/dashboard_live.json``.
+Enabled by default in one-shot runs of run_pipeline; ``--watch`` mode is
+log-only but still persists the JSON snapshot (``logs/dashboard_live.json``)
+for headless observability.
 
-Shows pending/processed counts, current video + step timing, data sources in
-use (title, description, chapters, transcript, NER, LLM), and each locale with
-confidence — including locales found during the current run and in the DB.
+Shows pipeline progress (counts, current video, step timing) AND what is
+being extracted from each video: transcript source/chars, food-gate verdict,
+video intel, Perceptor results (speakers, matched channel voices, novel
+frames, sample captions), and each locale with confidence.
 """
 
 from __future__ import annotations
@@ -38,7 +40,9 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from scripts.utils import LOCALES_JSON, LOGS_DIR, VISITS_JSON, load_json
+from scripts.utils import LOCALES_JSON, LOGS_DIR, VISITS_JSON, load_json, setup_logging
+
+logger = setup_logging("dashboard")
 
 # ── Pipeline steps ─────────────────────────────────────────────────────
 
@@ -49,6 +53,7 @@ PIPELINE_STEPS = [
     "Download audio",
     "Video intel",
     "Transcribe",
+    "Perceptor",
     "Chunk",
     "Extract (LLM)",
     "Geocode",
@@ -81,6 +86,15 @@ class VideoSourcesInfo:
     uses_ner: bool = False
     uses_llm: bool = False
     food_gate: str = ""
+
+    # Perceptor (audio/video perception)
+    perc_status: str = ""  # ok | partial | errored | ""
+    speakers_count: int = 0
+    voice_matches: list[str] = field(default_factory=list)  # "S0→voice_x (0.83)"
+    frames_sampled: int = 0
+    novelty_frames: int = 0
+    captions_count: int = 0
+    sample_captions: list[str] = field(default_factory=list)  # up to 3
 
 
 @dataclass
@@ -253,6 +267,10 @@ class Dashboard:
             if hasattr(src, k):
                 setattr(src, k, v)
         self._touch()
+
+    def set_perception(self, **kwargs: Any) -> None:
+        """Update Perceptor fields on the current video's sources."""
+        self.set_video_sources(**kwargs)
 
     def set_extractions(
         self,
@@ -429,7 +447,7 @@ class Dashboard:
             return None
 
     def reset_to_idle(self) -> None:
-        """Clear ephemeral run state so the web dashboard does not show a stale run."""
+        """Clear ephemeral run state so the persisted snapshot is not stale."""
         s = self.state
         s.phase = "Idle"
         s.current_video_index = 0
@@ -474,6 +492,9 @@ class Dashboard:
         header.append(f"  ⏱ {self._fmt_time(time.time() - s.start_time)}", style="dim")
         if s.pending:
             header.append(f"  · {s.pending} in coda", style="cyan")
+        hw = self._hardware_usage()
+        if hw:
+            header.append(f"  · {hw}", style="dim")
 
         stats_table = Table.grid(padding=(0, 2))
         stats_table.add_column(justify="right", style="dim")
@@ -527,7 +548,8 @@ class Dashboard:
             )
 
         loc_table = Table(show_header=True, header_style="bold", expand=True)
-        loc_table.add_column("Locale", ratio=4)
+        loc_table.add_column("Locale", ratio=3)
+        loc_table.add_column("Città", ratio=2)
         loc_table.add_column("Conf.", justify="right", width=6)
         loc_table.add_column("Voto", width=5)
         loc_table.add_column("Stato", width=6)
@@ -535,17 +557,61 @@ class Dashboard:
         for h in shown[-10:]:
             conf_style = "green" if h.confidence >= 0.72 else "yellow" if h.confidence >= 0.5 else "red"
             loc_table.add_row(
-                h.name[:55],
+                h.name[:45],
+                h.city[:25] or "—",
                 f"[{conf_style}]{h.confidence:.0%}[/]",
                 str(h.rating or "—"),
                 "[red]⚑[/]" if h.flagged else "ok",
             )
         if not shown:
-            loc_table.add_row("—", "—", "—", "—")
+            loc_table.add_row("—", "—", "—", "—", "—")
         locales_panel = Panel(
             loc_table,
             title=f"[bold]Locali ({len(s.run_locales)} in questa run)",
             border_style="magenta", expand=True,
+        )
+
+        # ── Extraction & perception: WHAT is being pulled from the video ──
+        src = s.sources
+        extraction = Text()
+        if src.transcript_source:
+            extraction.append("Trascrizione  ", style="bold")
+            extraction.append(
+                f"{src.transcript_source} · {src.transcript_chars:,} caratteri\n"
+            )
+        if src.food_gate:
+            extraction.append("Food gate     ", style="bold")
+            extraction.append(f"{src.food_gate[:110]}\n")
+        intel_bits = [
+            b for b in (
+                src.intel_type,
+                src.intel_city,
+                f"{src.venue_hints_count} hint" if src.venue_hints_count else "",
+                f"{src.chapters_count} capitoli" if src.chapters_count else "",
+            ) if b
+        ]
+        if intel_bits:
+            extraction.append("Intel         ", style="bold")
+            extraction.append(f"{' · '.join(intel_bits)}\n")
+        if src.perc_status:
+            status_style = {"ok": "green", "partial": "yellow"}.get(src.perc_status, "red")
+            extraction.append("Perceptor     ", style="bold")
+            extraction.append(f"{src.perc_status}", style=status_style)
+            extraction.append(
+                f" · {src.speakers_count} speaker"
+                f" · frame {src.novelty_frames} nuovi/{src.frames_sampled}"
+                f" · {src.captions_count} caption\n"
+            )
+            for match in src.voice_matches[:3]:
+                extraction.append(f"  voce nota  {match}\n", style="cyan")
+            for cap in src.sample_captions[:3]:
+                extraction.append(f"  » {cap[: cols - 10]}\n", style="italic dim")
+        if not extraction.plain:
+            extraction.append("(in attesa di dati…)", style="dim italic")
+        extraction_panel = Panel(
+            extraction,
+            title="[bold]Estrazione & Percezione",
+            border_style="yellow", expand=True,
         )
 
         progress_panel = Panel(
@@ -567,6 +633,7 @@ class Dashboard:
             "",
             stats_panel,
             video_panel,
+            extraction_panel,
             locales_panel,
             progress_panel,
             log_panel,
@@ -578,6 +645,30 @@ class Dashboard:
             expand=True,
             padding=(0, 1),
         )
+
+    _hw_cache: tuple[float, str] = (0.0, "")
+
+    def _hardware_usage(self) -> str:
+        """CPU/GPU % for the header, polled at most every 2 seconds."""
+        now = time.time()
+        ts, cached = self._hw_cache
+        if now - ts < 2.0:
+            return cached
+        text = ""
+        try:
+            from scripts.resource_monitor import dashboard_hardware
+
+            hw = dashboard_hardware()
+            parts = []
+            if hw.get("cpu_percent") is not None:
+                parts.append(f"CPU {hw['cpu_percent']:.0f}%")
+            if hw.get("gpu_percent") is not None:
+                parts.append(f"GPU {hw['gpu_percent']:.0f}%")
+            text = " · ".join(parts)
+        except Exception:
+            pass
+        self._hw_cache = (now, text)
+        return text
 
     @staticmethod
     def _fmt_time(seconds: float | None) -> str:
@@ -618,58 +709,8 @@ def compute_live_stats() -> dict[str, int]:
     }
 
 
-def build_web_state(snapshot: dict | None, *, pipeline_running: bool) -> dict:
-    """Merge pipeline snapshot with live DB stats; hide stale run data when idle."""
-    live = compute_live_stats()
-    base: dict = dict(snapshot) if snapshot else {}
-
-    stats = dict(base.get("stats") or {})
-    stats.update(live)
-    stats["run_locales_count"] = (
-        len(base.get("run_locales") or []) if pipeline_running else 0
-    )
-    base["stats"] = stats
-
-    base["database_locales"] = _database_locales_with_confidence(limit=50)
-    base["pipeline_running"] = pipeline_running
-
-    if not pipeline_running:
-        base["phase"] = "Idle"
-        snap_phase = (snapshot or {}).get("phase", "Idle")
-        had_run = bool(
-            (snapshot or {}).get("run_locales")
-            or (snapshot or {}).get("recent_videos")
-            or ((snapshot or {}).get("current_video") or {}).get("video_id")
-            or snap_phase not in ("Idle", "")
-        )
-        base["stale_snapshot"] = had_run
-        base["run_locales"] = []
-        base["recent_videos"] = []
-        base["current_video"] = {
-            "index": 0,
-            "total": 0,
-            "video_id": "",
-            "title": "",
-            "step": "",
-            "step_index": 0,
-            "sources": asdict(VideoSourcesInfo()),
-            "extractions": [],
-        }
-        base["timing"] = {
-            "run_elapsed_s": None,
-            "current_video_elapsed_s": None,
-            "current_step_elapsed_s": None,
-            "avg_video_s": None,
-            "videos_completed_this_run": 0,
-        }
-    else:
-        base["stale_snapshot"] = False
-
-    return base
-
-
 def _database_locales_with_confidence(limit: int = 50) -> list[dict]:
-    """Merge locales.json + latest visit confidence for the web dashboard."""
+    """Merge locales.json + latest visit confidence for the snapshot."""
     locales = load_json(LOCALES_JSON)
     visits = load_json(VISITS_JSON)
     best_conf: dict[str, float] = {}

@@ -109,3 +109,94 @@ class TestParseVttScrollingDedup:
         vtt = tmp_vtt("WEBVTT\n\n")
         result = _parse_vtt(vtt)
         assert result is None
+
+
+class TestMlxBackendSelection:
+    """The mlx-whisper backend is used when the hardware profile selects it,
+    with graceful fallback to faster-whisper when mlx is not importable."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_model_cache(self):
+        import scripts.transcribe_video as tv
+        tv.release_whisper_model()
+        yield
+        tv.release_whisper_model()
+
+    def _profile_with_backend(self, backend: str):
+        from scripts.hardware import get_profile
+        base = get_profile()
+        import dataclasses
+        return dataclasses.replace(base, asr_backend=backend)
+
+    def test_mlx_backend_selected(self, monkeypatch):
+        import sys
+        import types
+        import scripts.transcribe_video as tv
+
+        fake_mlx = types.ModuleType("mlx_whisper")
+        fake_mlx.transcribe = lambda *a, **k: {"language": "it", "segments": []}
+        monkeypatch.setitem(sys.modules, "mlx_whisper", fake_mlx)
+        monkeypatch.setattr(
+            tv, "get_profile", lambda: self._profile_with_backend("mlx_whisper")
+        )
+
+        with tv._whisper_lock:
+            model, backend = tv._load_whisper_model_locked("large-v3-turbo")
+
+        assert backend == tv._BACKEND_MLX
+        assert isinstance(model, tv._MlxWhisperModel)
+        assert model.repo_id == "mlx-community/whisper-large-v3-turbo"
+
+    def test_mlx_wrapper_drops_fp16_kwarg(self, monkeypatch):
+        import sys
+        import types
+        import scripts.transcribe_video as tv
+
+        seen: dict = {}
+
+        def fake_transcribe(audio, **kwargs):
+            seen.update(kwargs)
+            return {"language": "it", "segments": []}
+
+        fake_mlx = types.ModuleType("mlx_whisper")
+        fake_mlx.transcribe = fake_transcribe
+        monkeypatch.setitem(sys.modules, "mlx_whisper", fake_mlx)
+
+        wrapper = tv._MlxWhisperModel("mlx-community/whisper-large-v3-turbo")
+        wrapper.transcribe("audio.wav", language="it", fp16=True, verbose=False)
+
+        assert "fp16" not in seen
+        assert seen["path_or_hf_repo"] == "mlx-community/whisper-large-v3-turbo"
+        assert seen["language"] == "it"
+
+    def test_fallback_when_mlx_missing(self, monkeypatch):
+        import builtins
+        import sys
+        import scripts.transcribe_video as tv
+
+        monkeypatch.delitem(sys.modules, "mlx_whisper", raising=False)
+        real_import = builtins.__import__
+
+        def block_mlx(name, *args, **kwargs):
+            if name == "mlx_whisper":
+                raise ImportError("mlx_whisper unavailable")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", block_mlx)
+        monkeypatch.setattr(
+            tv, "get_profile", lambda: self._profile_with_backend("mlx_whisper")
+        )
+
+        class FakeWhisperModel:
+            def __init__(self, *a, **k):
+                pass
+
+        fake_fw = pytest.importorskip("types").ModuleType("faster_whisper")
+        fake_fw.WhisperModel = FakeWhisperModel
+        monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+        with tv._whisper_lock:
+            model, backend = tv._load_whisper_model_locked("large-v3-turbo")
+
+        assert backend == tv._BACKEND_FASTER
+        assert isinstance(model, FakeWhisperModel)
