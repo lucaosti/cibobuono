@@ -4,9 +4,9 @@
 yt-dlp>=2024.0.0
 
 # Transcription (Whisper — local, open source)
-# faster-whisper (CTranslate2 + Metal/CUDA) is the primary backend on Apple
-# Silicon: ~6–8× real-time on M-series with large-v3-turbo. openai-whisper
-# stays as a pure-Python safety fallback when CTranslate2 is unavailable.
+# Backend order per hardware profile: mlx-whisper (Metal GPU, Apple Silicon
+# only — see markers below) → faster-whisper (CUDA float16 / CPU int8) →
+# openai-whisper as a pure-Python safety fallback.
 faster-whisper>=1.0.0
 openai-whisper>=20231117
 
@@ -19,9 +19,27 @@ psutil>=5.9.0
 
 # Zero-shot NER (neuro-symbolic venue candidates; CPU/MPS via PyTorch)
 torch>=2.2.0
-transformers>=4.40.0
+# Qwen2-VL image processor (Perceptor captioning) requires torchvision
+torchvision>=0.17.0
+# <5 pin: mlx-vlm's mlx-lm dependency breaks against transformers 5.x
+# (AutoTokenizer.register API change); Qwen2-VL needs >=4.49.
+transformers>=4.49.0,<5
 gliner>=0.2.0
 langdetect>=1.0.9
+
+# Perceptor — VAD + speaker embeddings (Silero VAD + TitaNet via ONNX runtime)
+sherpa-onnx>=1.10.0
+numpy>=1.26.0
+
+# Perceptor — video frame sampling + perceptual-hash novelty dedup
+av>=12.0.0
+imagehash>=4.3.1
+
+# Perceptor — Apple Silicon GPU (Metal) backends for ASR and VLM captioning.
+# PEP 508 markers keep Linux/Windows installs clean; CUDA machines use
+# faster-whisper (above) and transformers for Qwen2-VL instead.
+mlx-whisper>=0.4.0 ; sys_platform == 'darwin' and platform_machine == 'arm64'
+mlx-vlm>=0.1.12 ; sys_platform == 'darwin' and platform_machine == 'arm64'
 
 # Geocoding (open source, no API key)
 geopy>=2.4.0

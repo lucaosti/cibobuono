@@ -150,6 +150,7 @@ def run_pipeline(
     no_dashboard: bool = False,
     auto_models: bool = True,
     parallel_postprocess: bool | None = None,
+    perceptor: bool | None = None,
     _external_setup: bool = False,
 ):
     """
@@ -163,6 +164,8 @@ def run_pipeline(
         whisper_model: Whisper model size (tiny, base, small, medium, large)
         max_videos: Max pending videos to process in this run (0 = all pending)
         no_dashboard: Disable live dashboard (log-only mode)
+        perceptor: Enable the audio/video perception stage (None = env
+            CIBOBUONO_PERCEPTOR; default off)
         _external_setup: Internal flag; True when invoked from run_pipeline_watch
             so signal handlers and the shutdown flag are managed by the caller.
     """
@@ -397,11 +400,20 @@ def run_pipeline(
         )
 
         io_workers = int(os.environ.get("CIBOBUONO_IO_WORKERS", "4"))
+        from scripts.perceptor import perceptor_enabled
+
+        _perceptor_on = perceptor_enabled(perceptor)
+        if _perceptor_on:
+            _log("Perceptor enabled — audio/video perception per video")
         _par_whisper = (
             parallel_whisper_enabled(profile.has_cuda, profile.gpu_vram_gb)
             and not skip_transcribe
             and not skip_extract
         )
+        if _par_whisper and _perceptor_on and (profile.gpu_vram_gb or 0) < 16:
+            # Whisper(N+1) + LLM(N) + VLM would not fit — captioning wins.
+            _log("Parallel Whisper disabled: Perceptor VLM needs the VRAM headroom")
+            _par_whisper = False
         if _par_whisper:
             _log(
                 f"Parallel Whisper enabled (VRAM={profile.gpu_vram_gb} GB) — "
@@ -608,6 +620,53 @@ def run_pipeline(
                     transcript_source=transcript.get("source", "whisper"),
                     transcript_chars=len(transcript.get("text", "")),
                 )
+
+                # Step 4.5: Perceptor (audio/video perception) — best-effort,
+                # never fatal. VRAM order on sequential CUDA: Whisper released
+                # here → VLM captions → VLM released → LLM preloads below.
+                if _perceptor_on:
+                    if not skip_transcribe and not _par_whisper:
+                        from scripts.transcribe_video import release_whisper_model
+
+                        release_whisper_model()
+                    dash.set_step("Perceptor")
+                    _log("  Perceiving audio/video (VAD, speakers, frames)...")
+                    from scripts.perceptor import run_perceptor_stage, upsert_perception
+
+                    perc = run_perceptor_stage(video, transcript, _log)
+                    if perc:
+                        upsert_perception(perc)
+                        p_audio = perc.get("audio") or {}
+                        p_video = perc.get("video") or {}
+                        speakers = p_audio.get("speakers", [])
+                        captions = p_video.get("captions", [])
+                        dash.set_perception(
+                            perc_status=perc.get("status", ""),
+                            speakers_count=len(speakers),
+                            voice_matches=[
+                                f"{s['label']}→{s['voice_id']} ({s['voice_match_score']})"
+                                for s in speakers
+                                if s.get("voice_id") and s.get("voice_match_score")
+                            ],
+                            frames_sampled=p_video.get("frames_sampled", 0),
+                            novelty_frames=p_video.get("novelty_frames", 0),
+                            captions_count=len(captions),
+                            sample_captions=[c["caption"] for c in captions[:3]],
+                        )
+                        recap["perception"] = {
+                            "status": perc.get("status"),
+                            "speakers": len(speakers),
+                            "novelty_frames": p_video.get("novelty_frames", 0),
+                            "captions": len(captions),
+                        }
+                        _log(
+                            f"  Perceptor: {len(speakers)} speaker, "
+                            f"{p_video.get('novelty_frames', 0)} frame nuovi, "
+                            f"{len(captions)} caption"
+                        )
+                    from scripts.perceptor_video import release_vlm
+
+                    release_vlm()
 
                 # Hand VRAM from Whisper to LLM (sequential) -OR- submit the
                 # next Whisper to a background thread while keeping both models
@@ -969,6 +1028,7 @@ def run_pipeline_watch(
     whisper_model: str = WHISPER_DEFAULT_MODEL,
     max_videos: int = 100,
     auto_models: bool = True,
+    perceptor: bool | None = None,
 ) -> None:
     """Run the pipeline continuously: catalog + process + push + sleep, repeat.
 
@@ -1011,6 +1071,7 @@ def run_pipeline_watch(
                     max_videos=max_videos,
                     no_dashboard=True,  # watch mode is log-only
                     auto_models=auto_models,
+                    perceptor=perceptor,
                     _external_setup=True,
                 )
             except SystemExit:
@@ -1181,6 +1242,11 @@ def main():
         "--print-hardware", action="store_true",
         help="Print the detected hardware profile (Whisper + LLM params) as JSON and exit",
     )
+    parser.add_argument(
+        "--perceptor", action="store_true",
+        help="Enable audio/video perception (VAD, diarization, voice registry, "
+             "frame captioning); also via CIBOBUONO_PERCEPTOR=1",
+    )
 
     args = parser.parse_args()
 
@@ -1227,6 +1293,7 @@ def main():
             whisper_model=args.whisper_model or WHISPER_DEFAULT_MODEL,
             max_videos=args.max_videos,
             auto_models=not args.no_auto_models,
+            perceptor=True if args.perceptor else None,
         )
         return
 
@@ -1240,6 +1307,7 @@ def main():
         no_dashboard=args.no_dashboard,
         auto_models=not args.no_auto_models,
         parallel_postprocess=not args.no_parallel_postprocess,
+        perceptor=True if args.perceptor else None,
     )
 
 

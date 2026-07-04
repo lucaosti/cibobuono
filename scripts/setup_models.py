@@ -180,6 +180,98 @@ def download_ner() -> None:
 
 
 
+@dataclass(frozen=True)
+class PerceptorAsset:
+    filename: str
+    url: str
+    min_bytes: int  # sanity floor: reject truncated/error-page downloads
+
+
+# ONNX models from the sherpa-onnx release mirrors (small, stable URLs).
+PERCEPTOR_ASSETS: tuple[PerceptorAsset, ...] = (
+    PerceptorAsset(
+        "silero_vad.onnx",
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+        500_000,
+    ),
+    PerceptorAsset(
+        "nemo_en_titanet_small.onnx",
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx",
+        30_000_000,
+    ),
+)
+
+
+def download_perceptor_assets() -> None:
+    """Fetch Perceptor ONNX models and warm the VLM / mlx-whisper caches."""
+    from scripts.perceptor_audio import PERCEPTOR_MODELS_DIR
+
+    PERCEPTOR_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    import urllib.request
+
+    for asset in PERCEPTOR_ASSETS:
+        dest = PERCEPTOR_MODELS_DIR / asset.filename
+        if dest.is_file() and dest.stat().st_size >= asset.min_bytes:
+            logger.info("Already present: %s", dest.name)
+            continue
+        logger.info("Downloading %s …", asset.filename)
+        tmp = dest.with_suffix(".tmp")
+        urllib.request.urlretrieve(asset.url, tmp)
+        if tmp.stat().st_size < asset.min_bytes:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Downloaded {asset.filename} is smaller than expected "
+                f"({asset.min_bytes} B floor) — bad URL or release moved"
+            )
+        tmp.replace(dest)
+        logger.info("Saved %s (%.1f MB)", dest.name, dest.stat().st_size / 1024**2)
+
+    profile = get_profile()
+
+    # Warm HF caches for the GPU-tier models so the first pipeline run does
+    # not stall on multi-GB downloads.
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        logger.warning("huggingface_hub missing — skipping VLM/mlx cache warm")
+        return
+
+    if profile.asr_backend == "mlx_whisper":
+        repo = f"mlx-community/whisper-{profile.whisper_model}"
+        logger.info("Warming mlx-whisper cache: %s", repo)
+        snapshot_download(repo)
+    if profile.vlm_backend != "none" and profile.vlm_model:
+        logger.info("Warming VLM cache: %s", profile.vlm_model)
+        snapshot_download(profile.vlm_model)
+
+
+def _perceptor_deps_installed() -> bool:
+    import importlib.util
+
+    return all(
+        importlib.util.find_spec(m) is not None
+        for m in ("sherpa_onnx", "numpy", "av", "imagehash")
+    )
+
+
+def verify_perceptor_assets() -> list[str]:
+    """Perceptor asset issues; empty when OK or when deps are not installed
+    (CI has no perceptor deps and must stay green)."""
+    if not _perceptor_deps_installed():
+        return []
+    from scripts.perceptor_audio import PERCEPTOR_MODELS_DIR
+
+    issues: list[str] = []
+    for asset in PERCEPTOR_ASSETS:
+        dest = PERCEPTOR_MODELS_DIR / asset.filename
+        if not dest.is_file() or dest.stat().st_size < asset.min_bytes:
+            issues.append(
+                f"Perceptor model missing: {dest} "
+                "(run: python -m scripts.setup_models --perceptor-only)"
+            )
+    return issues
+
+
 def verify_assets(*, models_dir: Path = MODELS_DIR) -> list[str]:
     """Return list of missing/problem descriptions (empty = OK)."""
     issues: list[str] = []
@@ -207,6 +299,7 @@ def verify_assets(*, models_dir: Path = MODELS_DIR) -> list[str]:
     except Exception as exc:
         issues.append(f"NER model {NER_MODEL_NAME} not ready: {exc}")
 
+    issues.extend(verify_perceptor_assets())
     return issues
 
 
@@ -216,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--whisper-only", action="store_true")
     parser.add_argument("--ner-only", action="store_true")
     parser.add_argument("--llm-only", action="store_true")
+    parser.add_argument("--perceptor-only", action="store_true")
     parser.add_argument("--force-llm", action="store_true", help="Re-download GGUF even if present")
     parser.add_argument("--verify", action="store_true", help="Check assets only, no downloads")
     parser.add_argument("--whisper-model", default=WHISPER_DEFAULT_MODEL)
@@ -243,7 +337,9 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("All model assets present.")
         return 0
 
-    only_flags = sum([args.whisper_only, args.ner_only, args.llm_only])
+    only_flags = sum(
+        [args.whisper_only, args.ner_only, args.llm_only, args.perceptor_only]
+    )
     do_all = only_flags == 0
 
     if args.force_llm:
@@ -257,6 +353,13 @@ def main(argv: list[str] | None = None) -> int:
         download_whisper(args.whisper_model)
     if do_all or args.ner_only:
         download_ner()
+    if do_all or args.perceptor_only:
+        if _perceptor_deps_installed():
+            download_perceptor_assets()
+        else:
+            logger.warning(
+                "Perceptor deps not installed — skipping perceptor assets"
+            )
 
     issues = verify_assets()
     if issues:

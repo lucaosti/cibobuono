@@ -455,6 +455,48 @@ def download_audio(video_id: str, video_url: str) -> Path | None:
         return None
 
 
+def download_video(video_id: str, video_url: str, *, max_height: int = 480) -> Path | None:
+    """Download a low-resolution video for Perceptor frame sampling.
+
+    Capped at *max_height* to bound bandwidth and disk (~0.5 GB/h at 480p);
+    the caller deletes the file right after frame extraction. Returns the
+    cached mp4 path or None on failure.
+    """
+    ensure_dirs()
+    output_path = CACHE_DIR / f"{video_id}_video.mp4"
+
+    if output_path.exists():
+        logger.info(f"Video already cached: {video_id}")
+        return output_path
+
+    try:
+        url = video_url if video_url.startswith("http") else f"https://youtu.be/{video_id}"
+        result = _run_ytdlp_with_retry(
+            [
+                *yt_dlp_command(),
+                "-f", f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b",
+                "--merge-output-format", "mp4",
+                "-o", str(output_path),
+                "--no-playlist",
+                *YOUTUBE_EXTRACTOR_ARGS,
+                url,
+            ],
+            timeout=900,
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Failed to download video for {video_id}: {result.stderr[:500]}")
+            return None
+        return output_path if output_path.exists() else None
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"Timeout downloading video for {video_id}")
+        return None
+    except Exception as e:
+        logger.error(f"Error downloading video for {video_id}: {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Phase 1: Catalog all videos (no download)
 # ---------------------------------------------------------------------------

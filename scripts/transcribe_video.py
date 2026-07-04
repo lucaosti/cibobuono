@@ -41,6 +41,7 @@ logger = setup_logging("transcribe")
 # and written to cached JSON, so keep stable.
 _BACKEND_FASTER = "faster_whisper"
 _BACKEND_OPENAI = "openai_whisper"
+_BACKEND_MLX = "mlx_whisper"
 
 # Global Whisper model cache (loaded once per session, like the LLM)
 _whisper_lock = threading.Lock()
@@ -274,6 +275,32 @@ def _get_whisper_model(model_name: str = WHISPER_DEFAULT_MODEL):
         return _load_whisper_model_locked(model_name)
 
 
+class _MlxWhisperModel:
+    """Thin adapter over the function-based mlx-whisper API.
+
+    Exposes the same ``transcribe()`` call shape as openai-whisper so the
+    segment-parsing branch in :func:`transcribe_audio` is shared. mlx-whisper
+    runs on the Metal GPU (Apple Silicon) — ~3.5x faster than CTranslate2 on
+    CPU for large-v3-turbo.
+    """
+
+    def __init__(self, repo_id: str):
+        self.repo_id = repo_id
+
+    def transcribe(self, audio_path: str, **kwargs) -> dict:
+        import mlx_whisper
+
+        kwargs.pop("fp16", None)  # MLX manages precision internally
+        return mlx_whisper.transcribe(
+            audio_path, path_or_hf_repo=self.repo_id, **kwargs
+        )
+
+
+def _mlx_repo_for(model_name: str) -> str:
+    """HF repo id of the MLX conversion for a Whisper model size."""
+    return f"mlx-community/whisper-{model_name}"
+
+
 def _load_whisper_model_locked(model_name: str):
     """Inner loader — must be called with _whisper_lock held."""
     global _whisper_model, _whisper_model_name, _whisper_backend, _whisper_device
@@ -296,6 +323,25 @@ def _load_whisper_model_locked(model_name: str):
         model_name = fitted
     else:
         logger.info("Whisper model selection: %s", note)
+
+    # mlx-whisper first when the profile selected it (Apple Silicon + mlx
+    # installed): Metal GPU, no model object to hold — weights load lazily on
+    # the first transcribe() call from the HF cache warmed by setup_models.
+    if profile.asr_backend == _BACKEND_MLX:
+        try:
+            import mlx_whisper  # noqa: F401 — availability check only
+
+            repo_id = _mlx_repo_for(model_name)
+            logger.info("Loading mlx-whisper model: %s (Metal GPU)", repo_id)
+            _whisper_model = _MlxWhisperModel(repo_id)
+            _whisper_model_name = model_name
+            _whisper_backend = _BACKEND_MLX
+            _whisper_device = "mlx"
+            return _whisper_model, _whisper_backend
+        except ImportError:
+            logger.info("mlx-whisper not installed; falling back to faster-whisper")
+        except Exception as e:
+            logger.warning(f"mlx-whisper load failed ({e}); falling back to faster-whisper")
 
     # faster-whisper has no Metal backend: on Apple Silicon we run CPU + int8.
     # On CUDA we use fp16 (or int8_float16 for small VRAM, picked in hardware.py).
@@ -362,6 +408,12 @@ def release_whisper_model() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except ImportError:
+        pass
+    try:
+        import mlx.core as mx
+
+        mx.clear_cache()
+    except Exception:
         pass
     logger.info("Whisper model released — VRAM freed for LLM extraction")
 

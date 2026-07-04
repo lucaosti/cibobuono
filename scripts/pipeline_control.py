@@ -1,8 +1,11 @@
 """
-pipeline_control.py — File-based pipeline control for the web dashboard.
+pipeline_control.py — File-based pipeline control (pause / resume / stop).
 
-The dashboard writes commands here; run_pipeline reads them between videos
-for pause/stop. Status survives dashboard restarts.
+Commands are written to ``logs/pipeline_control.json``; run_pipeline reads
+them between videos for pause/stop. Status survives process restarts.
+
+CLI:
+    python -m scripts.pipeline_control {status|pause|resume|stop}
 """
 
 from __future__ import annotations
@@ -12,47 +15,14 @@ __author__ = "Luca Ostinelli"
 import json
 import os
 import signal
-import subprocess
-import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-from scripts.utils import (
-    CHANNELS_INPUT,
-    CHANNELS_JSON,
-    CORRECTIONS_JSON,
-    DATA_DIR,
-    FLAGGED_SEGMENTS_JSON,
-    LOCALES_JSON,
-    LOGS_DIR,
-    PROCESSED_VIDEOS_JSON,
-    PROJECT_ROOT,
-    SKIPPED_VIDEOS_JSON,
-    VIDEOS_JSON,
-    VISITS_JSON,
-    load_json,
-    save_json,
-)
-
-from scripts.review_queue import LOCALE_REPORTS_JSON
+from scripts.utils import LOGS_DIR
 
 CONTROL_PATH = LOGS_DIR / "pipeline_control.json"
 PID_PATH = LOGS_DIR / "pipeline.pid"
-
-EDITABLE_FILES: dict[str, Path] = {
-    "channels_input.txt": CHANNELS_INPUT,
-    "channels.json": CHANNELS_JSON,
-    "videos.json": VIDEOS_JSON,
-    "locales.json": LOCALES_JSON,
-    "visits.json": VISITS_JSON,
-    "processed_videos.json": PROCESSED_VIDEOS_JSON,
-    "flagged_segments.json": FLAGGED_SEGMENTS_JSON,
-    "skipped_videos.json": SKIPPED_VIDEOS_JSON,
-    "corrections.json": CORRECTIONS_JSON,
-    "locale_reports.json": LOCALE_REPORTS_JSON,
-}
 
 
 def _now_iso() -> str:
@@ -193,35 +163,6 @@ def request_stop() -> tuple[bool, str]:
     return True, state["message"]
 
 
-def start_pipeline(*, max_videos: int = 0) -> tuple[bool, str]:
-    state = sync_status()
-    if _pid_alive(state.get("pid")):
-        return False, f"Pipeline already running (pid {state['pid']})"
-
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable,
-        "-m",
-        "scripts.run_pipeline",
-        "--no-dashboard",
-        "--max-videos",
-        str(int(max_videos)),
-    ]
-    log_path = LOGS_DIR / "pipeline.log"
-    with open(log_path, "a", encoding="utf-8") as log_fh:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(PROJECT_ROOT),
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    # log_fh is closed here; the child process keeps its own copy of the fd
-    mark_started(pid=proc.pid, max_videos=max_videos)
-    label = f"{max_videos} videos" if max_videos > 0 else "all pending"
-    return True, f"Pipeline started (pid {proc.pid}, {label})"
-
-
 def wait_if_paused(*, should_abort=None, poll_s: float = 2.0) -> bool:
     """Block while pause is requested. Returns False if stop was requested."""
     while True:
@@ -245,25 +186,32 @@ def wait_if_paused(*, should_abort=None, poll_s: float = 2.0) -> bool:
         time.sleep(poll_s)
 
 
-def read_editable(name: str) -> tuple[Any, str]:
-    path = EDITABLE_FILES.get(name)
-    if path is None:
-        raise KeyError(name)
-    if name.endswith(".txt"):
-        return path.read_text(encoding="utf-8"), "text"
-    return load_json(path), "json"
+# ---------------------------------------------------------------------------
+# CLI: python -m scripts.pipeline_control {status|pause|resume|stop}
+# ---------------------------------------------------------------------------
 
 
-def write_editable(name: str, content: Any) -> None:
-    path = EDITABLE_FILES.get(name)
-    if path is None:
-        raise KeyError(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if name.endswith(".txt"):
-        if not isinstance(content, str):
-            raise ValueError("Expected string for text file")
-        path.write_text(content, encoding="utf-8")
-        return
-    if not isinstance(content, list):
-        raise ValueError("Expected JSON array")
-    save_json(path, content)
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Control a running pipeline")
+    parser.add_argument("command", choices=["status", "pause", "resume", "stop"])
+    args = parser.parse_args(argv)
+
+    if args.command == "status":
+        state = sync_status()
+        print(json.dumps(state, indent=2, ensure_ascii=False))
+        return 0
+
+    action = {
+        "pause": request_pause,
+        "resume": request_resume,
+        "stop": request_stop,
+    }[args.command]
+    ok, message = action()
+    print(message)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

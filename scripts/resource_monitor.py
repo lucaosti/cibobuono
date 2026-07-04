@@ -257,7 +257,7 @@ def snapshot(*, include_gpu: bool = False) -> ResourceSnapshot:
 
 
 def dashboard_hardware() -> dict[str, float | None]:
-    """Lightweight CPU/GPU % for the web dashboard (polled every second).
+    """Lightweight CPU/GPU % for the terminal dashboard header (polled ~2s).
 
     GPU % is compute utilization (SM busy), matching nvtop — NOT VRAM usage.
     """

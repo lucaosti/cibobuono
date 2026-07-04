@@ -68,13 +68,14 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 │   ├── handle_flagged_segments.py  # Import manually reviewed segments → locale + visit
 │   ├── manual_edits.py             # Dashboard-driven manual corrections (remove/add visits)
 │   ├── review_queue.py             # Pending-review queue + user locale reports
-│   ├── github_issues.py            # Prefilled GitHub issue URLs + cached Issues API reads
 │   ├── repair_stale_state.py       # Repair pending-but-already-extracted videos
 │   ├── pipeline_executor.py        # PipelineExecutor: background finalize (GPU/CPU overlap)
 │   ├── pipeline_metrics.py         # Per-run metrics aggregation → logs/pipeline_metrics.json
-│   ├── pipeline_control.py         # Runtime pause/stop/status control from dashboard
+│   ├── pipeline_control.py         # Runtime pause/resume/stop/status CLI (file-based)
 │   ├── dashboard.py                # Rich live terminal dashboard + JSON snapshot
-│   ├── dashboard_web.py            # Lightweight web dashboard (Flask)
+│   ├── perceptor.py                # Audio/video perception orchestrator (--perceptor)
+│   ├── perceptor_audio.py          # Silero VAD + speaker diarization + channel voice registry
+│   ├── perceptor_video.py          # Frame sampling + phash novelty + Qwen2-VL captioning
 │   ├── setup_models.py             # Model download + verification helper
 │   ├── push_to_github.py           # Git commit & push
 │   ├── validate_data.py            # Validate data/*.json against Pydantic schemas (CI / local)
@@ -112,7 +113,7 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 │   ├── test_extract_pipeline.py    # Full NER→classify→merge pipeline
 │   ├── test_verify.py              # OSM/Overpass verification
 │   ├── test_geocode.py             # Geocoding cache logic + batch geocode
-│   ├── test_github_issues.py       # Issue URL building + API cache
+│   ├── test_perceptor.py           # Novelty dedup, diarization, voice registry, stage guards
 │   ├── test_validate_data.py       # validate_data.py gate (all files OK / errors reported)
 │   ├── test_utils.py               # Shared utilities
 │   ├── test_data_integrity.py      # JSON referential integrity
@@ -366,6 +367,39 @@ Options:
   --poll-interval N    With --watch, seconds between cycles (default: 1800, min: 60)
   --no-parallel-postprocess  Run geocode/OSM/populate synchronously (disable GPU/CPU overlap)
   --print-hardware     Print the detected hardware profile as JSON and exit
+  --perceptor          Enable audio/video perception (VAD, diarization, voice
+                       registry, frame captioning); also via CIBOBUONO_PERCEPTOR=1
+```
+
+### Perceptor (audio/video perception, `--perceptor`)
+
+An optional per-video perception stage that enriches the pipeline with what
+can be *heard* and *seen*, using the best backend the machine supports:
+
+| Component | Technology | Backend selection |
+|---|---|---|
+| Voice activity | Silero VAD via sherpa-onnx | CPU, every tier |
+| Speaker diarization | TitaNet-small embeddings + cosine clustering | CPU, every tier |
+| Recurring voices | Per-channel registry (`data/voices.json`) | CPU, every tier |
+| ASR | Whisper large-v3-turbo | mlx-whisper (Metal) on Apple Silicon; faster-whisper fp16 on CUDA; faster-whisper int8 on CPU |
+| Frame novelty | PyAV sampling + perceptual hash (phash) | CPU; interval 2–5 s scaled to hardware |
+| Captioning | Qwen2-VL | mlx-vlm 4-bit on Apple Silicon; transformers on CUDA (7B AWQ ≥16 GB VRAM, 2B fp16 ≥8 GB); disabled on CPU-only |
+
+Results land in `data/perception.json` (per video: VAD segments, speaker
+labels with talk time, matched channel voices, novelty-frame captions with
+timestamps). The stage is best-effort: any perception failure is recorded and
+the main pipeline continues. Setup:
+
+```bash
+python -m scripts.setup_models --perceptor-only   # ONNX models + VLM cache warm
+python -m scripts.perceptor <video_id>            # one-shot on a cached video
+CIBOBUONO_PERCEPTOR=1 python -m scripts.run_pipeline --max-videos 1
+```
+
+Pipeline control (pause/resume/stop a running pipeline):
+
+```bash
+python -m scripts.pipeline_control status|pause|resume|stop
 ```
 
 ### Continuous mode (`--watch`)
@@ -400,7 +434,7 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 ### Key Features
 
 - **Newest-first processing**: Videos are processed newest-first so the freshest uploads land on the map quickest.
-- **Whisper-primary ASR**: Local Whisper `large-v3-turbo` via `faster-whisper` (CTranslate2 + Metal/CUDA) is the primary transcription engine. YouTube's *manual* subtitles are still preferred when an author has uploaded them (rare but high-quality); YouTube's *auto-generated* subtitles are explicitly **not** used because their Italian ASR mangles the proper nouns (venue/street names) we extract.
+- **Whisper-primary ASR**: Local Whisper `large-v3-turbo` is the primary transcription engine — via `mlx-whisper` (Metal GPU) on Apple Silicon, `faster-whisper` (CTranslate2) on CUDA/CPU. YouTube's *manual* subtitles are still preferred when an author has uploaded them (rare but high-quality); YouTube's *auto-generated* subtitles are explicitly **not** used because their Italian ASR mangles the proper nouns (venue/street names) we extract.
 - **Whisper with `initial_prompt`**: Whisper runs with an Italian food terminology prompt to bias transcription toward restaurant names, and with `vad_filter=True` on faster-whisper to drop silence/jingles.
 - **Continuous mode (`--watch`)**: Optional daemon loop that catalogs and processes new uploads forever, with model caching across cycles and graceful Ctrl+C.
 - **Video descriptions as context**: Descriptions supply regex-extracted **venue hints** (names/links); hints can protect a candidate so a single-chunk mention still counts as a catalogued visit when rules agree it was a visit.
@@ -691,13 +725,14 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 │   ├── handle_flagged_segments.py  # Importazione segmenti revisionati manualmente → locale + visita
 │   ├── manual_edits.py             # Correzioni manuali dalla dashboard (rimozione/aggiunta visite)
 │   ├── review_queue.py             # Coda revisioni in attesa + segnalazioni utente
-│   ├── github_issues.py            # URL issue GitHub precompilati + lettura API Issues in cache
 │   ├── repair_stale_state.py       # Ripara video pending già estratti
 │   ├── pipeline_executor.py        # PipelineExecutor: finalize in background (overlap GPU/CPU)
 │   ├── pipeline_metrics.py         # Aggregazione metriche per run → logs/pipeline_metrics.json
-│   ├── pipeline_control.py         # Controllo pause/stop/stato dalla dashboard
+│   ├── pipeline_control.py         # CLI pause/resume/stop/status (file-based)
 │   ├── dashboard.py                # Dashboard live nel terminale (Rich) + snapshot JSON
-│   ├── dashboard_web.py            # Dashboard web leggera (Flask)
+│   ├── perceptor.py                # Orchestratore percezione audio/video (--perceptor)
+│   ├── perceptor_audio.py          # Silero VAD + diarizzazione + registro voci per canale
+│   ├── perceptor_video.py          # Campionamento frame + novelty phash + captioning Qwen2-VL
 │   ├── setup_models.py             # Helper per download e verifica modelli
 │   ├── push_to_github.py           # Commit e push su Git
 │   ├── validate_data.py            # Validazione data/*.json vs Pydantic (CI / locale)
@@ -735,7 +770,7 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 │   ├── test_extract_pipeline.py    # Pipeline completa NER→classify→merge
 │   ├── test_verify.py              # Verifica OSM/Overpass
 │   ├── test_geocode.py             # Logica cache geocoding + batch geocode
-│   ├── test_github_issues.py       # Costruzione URL issue + cache API
+│   ├── test_perceptor.py           # Novelty dedup, diarizzazione, registro voci, guardie stage
 │   ├── test_validate_data.py       # Gate validate_data.py (tutti OK / errori riportati)
 │   ├── test_utils.py               # Utilità condivise
 │   ├── test_data_integrity.py      # Integrità referenziale JSON
@@ -989,6 +1024,39 @@ Opzioni:
   --poll-interval N    Con --watch, secondi tra un ciclo e l'altro (default: 1800, min: 60)
   --no-parallel-postprocess  Geocoding/OSM/popolamento sincrono (disabilita overlap GPU/CPU)
   --print-hardware     Stampa il profilo hardware rilevato come JSON ed esce
+  --perceptor          Abilita la percezione audio/video (VAD, diarizzazione,
+                       registro voci, captioning frame); anche via CIBOBUONO_PERCEPTOR=1
+```
+
+### Perceptor (percezione audio/video, `--perceptor`)
+
+Stage opzionale per video che arricchisce la pipeline con ciò che si *sente*
+e si *vede*, scegliendo il backend migliore per la macchina:
+
+| Componente | Tecnologia | Selezione backend |
+|---|---|---|
+| Attività vocale | Silero VAD via sherpa-onnx | CPU, ogni tier |
+| Diarizzazione speaker | Embedding TitaNet-small + clustering coseno | CPU, ogni tier |
+| Voci ricorrenti | Registro per canale (`data/voices.json`) | CPU, ogni tier |
+| ASR | Whisper large-v3-turbo | mlx-whisper (Metal) su Apple Silicon; faster-whisper fp16 su CUDA; faster-whisper int8 su CPU |
+| Novelty frame | Campionamento PyAV + hash percettivo (phash) | CPU; intervallo 2–5 s scalato sull'hardware |
+| Captioning | Qwen2-VL | mlx-vlm 4-bit su Apple Silicon; transformers su CUDA (7B AWQ ≥16 GB VRAM, 2B fp16 ≥8 GB); disattivato su CPU-only |
+
+I risultati finiscono in `data/perception.json` (per video: segmenti VAD,
+speaker con tempo di parola, voci del canale riconosciute, caption dei frame
+nuovi con timestamp). Lo stage è best-effort: un errore di percezione viene
+registrato e la pipeline principale prosegue. Setup:
+
+```bash
+python -m scripts.setup_models --perceptor-only   # modelli ONNX + warm cache VLM
+python -m scripts.perceptor <video_id>            # one-shot su un video in cache
+CIBOBUONO_PERCEPTOR=1 python -m scripts.run_pipeline --max-videos 1
+```
+
+Controllo pipeline (pausa/ripresa/stop di una pipeline in esecuzione):
+
+```bash
+python -m scripts.pipeline_control status|pause|resume|stop
 ```
 
 ### Modalità continua (`--watch`)
@@ -1023,7 +1091,7 @@ python -m scripts.run_pipeline --reset --skip-push --max-videos 0 --no-dashboard
 ### Funzionalità Chiave
 
 - **Processamento dal più recente**: I video vengono processati dal più recente così gli upload più freschi arrivano sulla mappa per primi.
-- **Whisper come ASR primario**: Whisper locale `large-v3-turbo` via `faster-whisper` (CTranslate2 + Metal/CUDA) è il motore di trascrizione principale. I sottotitoli *manuali* di YouTube sono ancora preferiti quando l'autore li ha caricati (rari ma di altissima qualità); i sottotitoli *auto-generati* di YouTube sono esclusi perché l'ASR italiano massacra i nomi propri (locali, vie) che sono il cuore del dataset.
+- **Whisper come ASR primario**: Whisper locale `large-v3-turbo` è il motore di trascrizione principale — via `mlx-whisper` (GPU Metal) su Apple Silicon, `faster-whisper` (CTranslate2) su CUDA/CPU. I sottotitoli *manuali* di YouTube sono ancora preferiti quando l'autore li ha caricati (rari ma di altissima qualità); i sottotitoli *auto-generati* di YouTube sono esclusi perché l'ASR italiano massacra i nomi propri (locali, vie) che sono il cuore del dataset.
 - **Whisper con `initial_prompt`**: Whisper gira con un prompt di terminologia food italiana per orientare la trascrizione sui nomi dei locali, e con `vad_filter=True` su faster-whisper per scartare silenzi/sigle.
 - **Modalità continua (`--watch`)**: Loop daemon opzionale che cataloga e processa i nuovi upload all'infinito, con i modelli caricati una sola volta tra i cicli e Ctrl+C graceful.
 - **Descrizioni video come contesto**: Dalla descrizione si estraggono via regex gli **hint** sui nomi dei locali; un hint può proteggere un candidato così che una sola menzione in un chunk resti una visita catalogata quando le regole confermano la visita.
