@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 logger = setup_logging("pipeline_metrics")
 
 METRICS_FILE = LOGS_DIR / "pipeline_metrics.json"
+EVAL_METRICS_FILE = LOGS_DIR / "eval_metrics.json"
 
 
 def compute_run_metrics(results: list["FinalizeResult"]) -> dict:
@@ -116,5 +117,55 @@ def record_run_metrics(
         record["visits_created"],
         record["geocode_rate"] or 0,
         record["osm_rate"] or 0,
+    )
+    return record
+
+
+def record_eval_metrics(metrics: dict, **extra) -> dict:
+    """Append a scripts.eval_pipeline.evaluate() result to EVAL_METRICS_FILE.
+
+    Trend-tracks classifier precision/recall/F1 over time so each redundancy
+    or calibration change (self-consistency ensemble, Perceptor fusion, Platt
+    scaling) can be attributed a before/after delta rather than judged by feel.
+    """
+    ensure_dirs()
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        **metrics,
+        **extra,
+    }
+
+    existing: list[dict] = []
+    if EVAL_METRICS_FILE.exists():
+        try:
+            with open(EVAL_METRICS_FILE, encoding="utf-8") as f:
+                existing = json.load(f)
+            if not isinstance(existing, list):
+                existing = []
+        except (json.JSONDecodeError, OSError):
+            existing = []
+
+    existing.append(record)
+
+    fd, tmp = tempfile.mkstemp(
+        suffix=".json.tmp", prefix=".eval_metrics.", dir=str(LOGS_DIR), text=True
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, EVAL_METRICS_FILE)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+    logger.info(
+        "Eval metrics recorded: n=%d precision=%s recall=%s f1=%s",
+        record.get("n", 0),
+        record.get("precision"),
+        record.get("recall"),
+        record.get("f1"),
     )
     return record
