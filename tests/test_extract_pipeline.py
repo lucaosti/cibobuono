@@ -173,3 +173,121 @@ def test_verify_venue_name_rejects_dish():
     # No LLM → structural gate only
     assert verify_venue_name(None, "Da Michele", "") is True
     assert verify_venue_name(None, "pizza", "") is False
+
+
+class TestMergeExtractionRowsAgreement:
+    def test_agreeing_sources_boost_confidence_over_either_alone(self):
+        from scripts.extract_pipeline import _merge_extraction_rows
+
+        ner_row = {"locale_name": "Roscioli", "confidence": 0.75, "notes": "rule hit"}
+        discovery_row = {"locale_name": "Roscioli", "confidence": 0.82, "notes": "llm discovery hit, more detail here"}
+        merged = _merge_extraction_rows([ner_row], [discovery_row])
+        assert len(merged) == 1
+        assert merged[0]["confidence"] > 0.82
+        assert merged[0]["_agreement"] == "ner+discovery"
+
+    def test_single_source_row_untouched(self):
+        from scripts.extract_pipeline import _merge_extraction_rows
+
+        ner_row = {"locale_name": "Roscioli", "confidence": 0.75, "notes": "rule hit"}
+        merged = _merge_extraction_rows([ner_row], [])
+        assert len(merged) == 1
+        assert merged[0]["confidence"] == 0.75
+        assert "_agreement" not in merged[0]
+
+
+class TestPerceptorSignalFusion():
+    def test_ocr_confirmation_raises_confidence(self):
+        from unittest.mock import patch
+
+        from scripts.extract_pipeline import _build_visit_row
+        from scripts.ner_candidates import Candidate
+
+        cand = Candidate(
+            name="Roscioli", label="ristorante", start_char=0, end_char=8,
+            start_time=12.0, chunk_index=0, ner_score=0.5,
+        )
+        chunk = {"start_timestamp": "0:12", "end_timestamp": "1:00"}
+        perception_record = {
+            "video": {"captions": [{"t": 13.0, "caption": "insegna Roscioli sullo sfondo"}]},
+            "audio": {"segment_speakers": []},
+        }
+
+        row_without = _build_visit_row(
+            cand, chunk, evidence="ev", conf=0.5, src="rule", detail={},
+            channel_rubriche=[], video_intel=None, video_title="",
+            perception_record=None,
+        )
+        row_with = _build_visit_row(
+            cand, chunk, evidence="ev", conf=0.5, src="rule", detail={},
+            channel_rubriche=[], video_intel=None, video_title="",
+            perception_record=perception_record,
+        )
+        assert row_with["confidence"] > row_without["confidence"]
+
+    def test_guest_speaker_lowers_confidence(self):
+        from scripts.extract_pipeline import _build_visit_row
+        from scripts.ner_candidates import Candidate
+
+        cand = Candidate(
+            name="Roscioli", label="ristorante", start_char=0, end_char=8,
+            start_time=12.0, chunk_index=0, ner_score=0.5,
+        )
+        chunk = {"start_timestamp": "0:12", "end_timestamp": "1:00"}
+        perception_record = {
+            "video": {"captions": []},
+            "audio": {"segment_speakers": [{"start": 10.0, "end": 15.0, "speaker": "S1"}]},
+        }
+
+        row_without = _build_visit_row(
+            cand, chunk, evidence="ev", conf=0.5, src="rule", detail={},
+            channel_rubriche=[], video_intel=None, video_title="",
+            perception_record=None,
+        )
+        row_with = _build_visit_row(
+            cand, chunk, evidence="ev", conf=0.5, src="rule", detail={},
+            channel_rubriche=[], video_intel=None, video_title="",
+            perception_record=perception_record,
+        )
+        assert row_with["confidence"] < row_without["confidence"]
+
+    def test_extract_from_video_loads_perception_record(self):
+        """extract_from_video should call get_perception(video_id) and pass
+        it through to row confidence — verified end to end with a mocked
+        perception record that flips the outcome."""
+        chunks = [
+            {
+                "chunk_index": 0,
+                "start_time": 0.0,
+                "start_timestamp": "0:00",
+                "end_timestamp": "0:45",
+                "text": "Siamo da Roscioli e assaggiamo la pizza bianca.",
+                "segment_timestamps": [(0.0, "Siamo da Roscioli e assaggiamo la pizza bianca.")],
+            }
+        ]
+        transcript = {"segments": [{"start": 0, "end": 10, "text": "Siamo da Roscioli e assaggiamo la pizza bianca."}]}
+        fake_cand = __import__(
+            "scripts.ner_candidates", fromlist=["Candidate"]
+        ).Candidate(
+            name="Roscioli", label="ristorante", start_char=0, end_char=8,
+            start_time=0.0, chunk_index=0, ner_score=0.6,
+        )
+        perception_record = {
+            "video": {"captions": [{"t": 1.0, "caption": "insegna Roscioli"}]},
+            "audio": {"segment_speakers": []},
+        }
+
+        with patch(
+            "scripts.extract_pipeline.extract_all_chunks_candidates",
+            return_value={0: ([fake_cand], [])},
+        ):
+            with patch("scripts.extract_pipeline.get_llm", return_value=None):
+                with patch("scripts.extract_pipeline.discover_venues_llm", return_value=[]):
+                    with patch(
+                        "scripts.extract_pipeline.get_perception", return_value=perception_record
+                    ) as mock_get_perception:
+                        ext, _ = extract_from_video(
+                            "v_perceptor", chunks, transcript=transcript
+                        )
+        mock_get_perception.assert_called_once_with("v_perceptor")
+        assert any(e["locale_name"] == "Roscioli" for e in ext)

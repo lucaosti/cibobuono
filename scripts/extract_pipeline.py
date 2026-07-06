@@ -32,7 +32,10 @@ from scripts.extract_locales import (
 from scripts.utils import CONFIDENCE_THRESHOLD, CONF_RULE_VISIT, CONF_BATCH_VISIT, CONF_CHAPTER_HINT
 from scripts.ner_candidates import Candidate, extract_all_chunks_candidates
 from scripts.utils import setup_logging
+from scripts.calibrate_confidence import apply_platt, load_calibration
+from scripts.perceptor import get_perception
 from scripts.venue_discovery import discover_venues_llm
+from scripts.vote_aggregator import combine_confidence, perceptor_votes
 from scripts.visit_classifier import (
     classify_candidate,
     classify_visit_rules,
@@ -194,11 +197,34 @@ def _detail_llm(
         return {}
 
 
+_calibration_cache: object = "_unloaded"
+
+
+def _calibration() -> tuple[float, float] | None:
+    """Lazily load the fitted Platt-scaling params (None if unfitted/missing)."""
+    global _calibration_cache
+    if _calibration_cache == "_unloaded":
+        _calibration_cache = load_calibration()
+    return _calibration_cache
+
+
 def _visit_confidence(conf: float, ner_score: float, src: str) -> float:
     bonus = 0.08 if src == "rule" else 0.05 if src == "llm" else 0.0
-    return _norm_confidence(
-        min(1.0, conf * _CONF_CLASSIFIER_WEIGHT + ner_score * _CONF_NER_WEIGHT + bonus)
-    )
+    return min(1.0, conf * _CONF_CLASSIFIER_WEIGHT + ner_score * _CONF_NER_WEIGHT + bonus)
+
+
+def _final_confidence(
+    base_conf: float,
+    perception_record: dict | None,
+    candidate_name: str,
+    candidate_time: float,
+) -> float:
+    """Blend the text-pipeline confidence with independent Perceptor votes
+    (log-odds combination; no-op when there's no perception data), then
+    apply the fitted confidence recalibration (no-op when unfitted)."""
+    votes = perceptor_votes(perception_record, candidate_name, candidate_time)
+    combined = combine_confidence(base_conf, votes) if votes else base_conf
+    return _norm_confidence(apply_platt(combined, _calibration()))
 
 
 def _promote_venue_hints(
@@ -206,6 +232,7 @@ def _promote_venue_hints(
     channel_rubriche: list[str],
     extractions: list[dict],
     flagged: list[dict],
+    perception_record: dict | None = None,
 ) -> None:
     """Promote ONLY structured, reliable hints (title/chapter) into extractions.
 
@@ -239,6 +266,7 @@ def _promote_venue_hints(
 
         conf = conf_map.get(str(h.get("confidence") or ""), 0.80)
         start = h.get("start_time")
+        conf = _final_confidence(conf, perception_record, name, float(start or 0.0))
         row = {
             "locale_name": name,
             "address": str(h.get("address") or "").strip(),
@@ -272,23 +300,51 @@ def _norm_confidence(x: object) -> float:
         return 0.55
 
 
+# Confidence boost when two independent sources (NER-rule pipeline and
+# holistic LLM discovery) agree on the same venue, instead of discarding the
+# agreement signal by only keeping "whichever has higher confidence".
+_SOURCE_AGREEMENT_BONUS = 0.10
+
+
 def _merge_extraction_rows(
     ner_rows: list[dict],
     discovery_rows: list[dict],
 ) -> list[dict]:
-    """Merge NER pipeline rows with holistic LLM discovery; keep best confidence per name."""
-    merged: dict[str, dict] = {}
-    for row in ner_rows + discovery_rows:
+    """Merge NER pipeline rows with holistic LLM discovery.
+
+    Same venue found by both sources: boost confidence (agreement is itself
+    evidence, per the Condorcet-jury intuition that independent agreeing
+    voters are more informative than either alone) instead of only keeping
+    the higher-confidence row. Venue found by one source only: keep as-is.
+    """
+    ner_by_norm: dict[str, dict] = {}
+    for row in ner_rows:
         norm = _normalize_name(row.get("locale_name", ""))
-        if not norm:
-            continue
-        prev = merged.get(norm)
-        if prev is None or float(row.get("confidence", 0)) > float(prev.get("confidence", 0)):
+        if norm:
+            ner_by_norm[norm] = row
+
+    disc_by_norm: dict[str, dict] = {}
+    for row in discovery_rows:
+        norm = _normalize_name(row.get("locale_name", ""))
+        if norm:
+            disc_by_norm[norm] = row
+
+    merged: dict[str, dict] = {}
+    for norm in set(ner_by_norm) | set(disc_by_norm):
+        a = ner_by_norm.get(norm)
+        b = disc_by_norm.get(norm)
+        if a is not None and b is not None:
+            best, other = (a, b) if float(a.get("confidence", 0)) >= float(b.get("confidence", 0)) else (b, a)
+            row = dict(best)
+            row["confidence"] = _norm_confidence(
+                float(row.get("confidence", 0)) + _SOURCE_AGREEMENT_BONUS
+            )
+            if len(str(other.get("notes") or "")) > len(str(row.get("notes") or "")):
+                row["notes"] = other.get("notes")
+            row["_agreement"] = "ner+discovery"
             merged[norm] = row
-            continue
-        # Same venue: prefer row with more detail
-        if len(str(row.get("notes") or "")) > len(str(prev.get("notes") or "")):
-            merged[norm] = {**prev, **{k: v for k, v in row.items() if v}}
+        else:
+            merged[norm] = a if a is not None else b
 
     # Fuzzy merge near-duplicates (e.g. "Da Remo" vs "Pizzeria Da Remo")
     keys = list(merged.keys())
@@ -320,6 +376,7 @@ def _build_visit_row(
     channel_rubriche: list[str],
     video_intel: VideoIntel | None,
     video_title: str,
+    perception_record: dict | None = None,
 ) -> dict:
     name_clean = _clean_locale_name(cand.name)
     rubrica = channel_rubriche[0] if channel_rubriche else ""
@@ -345,7 +402,12 @@ def _build_visit_row(
         "sentiment": _normalize_sentiment(detail.get("sentiment")),
         "notes": notes_merged,
         "rubrica": rubrica,
-        "confidence": _visit_confidence(conf, cand.ner_score, src),
+        "confidence": _final_confidence(
+            _visit_confidence(conf, cand.ner_score, src),
+            perception_record,
+            name_clean,
+            cand.start_time,
+        ),
         "chunk_start": chunk.get("start_timestamp", "0:00"),
         "chunk_end": chunk.get("end_timestamp", "0:00"),
         "chunk_start_seconds": cand.start_time,
@@ -420,6 +482,14 @@ def extract_from_video(
     llm = get_llm()
     chapters = (youtube_extra or {}).get("chapters") if youtube_extra else None
 
+    # Perceptor audio/video signals for this video, if the stage ran (best
+    # effort: absent/errored Perceptor data means perceptor_votes() abstains).
+    try:
+        perception_record = get_perception(video_id)
+    except Exception as e:
+        logger.warning(f"Could not load perception record for {video_id}: {e}")
+        perception_record = None
+
     # Holistic pass first: chapter/description-guided structured extraction.
     discovery_rows: list[dict] = []
     if llm and transcript:
@@ -431,6 +501,13 @@ def extract_from_video(
             video_intel=video_intel,
             chapters=chapters,
         )
+        for row in discovery_rows:
+            row["confidence"] = _final_confidence(
+                float(row.get("confidence", 0.0)),
+                perception_record,
+                row.get("locale_name", ""),
+                float(row.get("mention_time", 0.0) or 0.0),
+            )
 
     # Accumulate positive visit hits per normalized name: list of dict records
     visit_hits: list[dict] = []
@@ -474,6 +551,7 @@ def extract_from_video(
                     channel_rubriche=channel_rubriche,
                     video_intel=video_intel,
                     video_title=video_title,
+                    perception_record=perception_record,
                 )
                 visit_hits.append(
                     {
@@ -564,6 +642,7 @@ def extract_from_video(
             channel_rubriche=channel_rubriche,
             video_intel=video_intel,
             video_title=video_title,
+            perception_record=perception_record,
         )
         visit_hits.append(
             {
@@ -599,7 +678,9 @@ def extract_from_video(
         best = max(group, key=lambda x: x["row"]["confidence"])
         extractions.append(best["row"])
 
-    _promote_venue_hints(video_intel, channel_rubriche, extractions, flagged)
+    _promote_venue_hints(
+        video_intel, channel_rubriche, extractions, flagged, perception_record
+    )
 
     extractions = _merge_extraction_rows(extractions, discovery_rows)
 

@@ -219,6 +219,107 @@ def classify_with_llm(
         return False, "", 0.4
 
 
+_DEVILS_ADVOCATE_SYSTEM = (
+    "You decide if an Italian food vlog excerpt shows the host PHYSICALLY at the named place "
+    "(eating, ordering, on location). First consider whether this could just be a MENTION "
+    "(comparison, joke, future plan, name-drop) rather than an actual visit, then decide. "
+    "Answer ONLY JSON."
+)
+
+# Reasons from classify_visit_rules genuinely ambiguous enough to justify the
+# extra LLM calls below (both patterns fire, or neither does) — most "unsure"
+# cases (e.g. a visit pattern with weak food evidence) are cheaper to resolve
+# with a single classify_with_llm() call. "empty_window" is deliberately
+# excluded: with no transcript text at all, there's no evidence for 3 samples
+# to disagree over usefully — it's pure extra GPU cost for the same guess.
+AMBIGUOUS_RULE_REASONS = frozenset({"conflict_patterns", "no_clear_signal"})
+
+
+def _classify_with_llm_variant(
+    llm,
+    window_text: str,
+    candidate: "Candidate",
+    *,
+    temperature: float,
+    system_prompt: str,
+) -> tuple[bool, str]:
+    """One sampled LLM vote; returns (visit, evidence). Never raises."""
+    user_msg = _VISIT_USER_TEMPLATE.format(
+        name=candidate.name.replace('"', "'")[:120],
+        window=(window_text[:2500]).replace('"', "'"),
+    )
+    try:
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=min(180, LLM_MAX_TOKENS),
+            temperature=temperature,
+            response_format={"type": "json_object"},
+            stop=["```"],
+        )
+        out = response["choices"][0]["message"]["content"].strip()
+        data = _parse_llm_visit_json(out)
+        if data is None:
+            return False, ""
+        return bool(data.get("visit")), str(data.get("evidence", "")).strip()[:500]
+    except Exception as e:
+        logger.warning(f"LLM visit classify variant failed: {e}")
+        return False, ""
+
+
+def classify_with_llm_ensemble(
+    llm,
+    window_text: str,
+    candidate: "Candidate",
+    n_samples: int = 3,
+) -> tuple[bool, str, float]:
+    """Self-consistency vote for genuinely ambiguous candidates only.
+
+    Diversifies the 3 samples instead of re-asking the same greedy prompt
+    (which would just reproduce classify_with_llm's answer): one baseline
+    greedy call, one sampled at higher temperature, one reframed to argue the
+    "mention" case first. This costs 3x the LLM calls of classify_with_llm,
+    so callers must gate it to the "unsure" bucket, not run it on every
+    candidate (see AMBIGUOUS_RULE_REASONS / classify_candidate).
+
+    Returns (majority_visit, evidence, confidence) where confidence scales
+    with how much the samples agreed.
+    """
+    if llm is None:
+        return False, "", 0.4
+
+    votes: list[bool] = []
+    evidences: list[str] = []
+
+    v0, ev0, _ = classify_with_llm(llm, window_text, candidate)
+    votes.append(v0)
+    evidences.append(ev0)
+
+    v1, ev1 = _classify_with_llm_variant(
+        llm, window_text, candidate, temperature=0.7, system_prompt=_VISIT_SYSTEM
+    )
+    votes.append(v1)
+    evidences.append(ev1)
+
+    v2, ev2 = _classify_with_llm_variant(
+        llm, window_text, candidate, temperature=0.0, system_prompt=_DEVILS_ADVOCATE_SYSTEM
+    )
+    votes.append(v2)
+    evidences.append(ev2)
+
+    n = len(votes)
+    visit_votes = sum(1 for v in votes if v)
+    majority = visit_votes > n / 2
+    agreement = (visit_votes if majority else n - visit_votes) / n
+
+    evidence = next((e for v, e in zip(votes, evidences) if v == majority and e), "")
+    base_conf = 0.85 if majority else 0.72
+    conf = min(1.0, base_conf * (0.7 + 0.3 * agreement))
+    return majority, evidence, conf
+
+
 # Additional non-venue terms not already covered by FOOD_LEXICON.
 # NON_VENUE_TERMS is the authoritative rejection set; it is defined as
 # FOOD_LEXICON | _NON_VENUE_EXTRA so the two sets stay in sync automatically.
@@ -329,6 +430,9 @@ def classify_candidate(
     if llm is None:
         return False, f"[unsure:{reason},no_llm]", 0.35, "rule"
 
-    v, ev, c = classify_with_llm(llm, window_text, candidate)
+    if reason in AMBIGUOUS_RULE_REASONS:
+        v, ev, c = classify_with_llm_ensemble(llm, window_text, candidate)
+    else:
+        v, ev, c = classify_with_llm(llm, window_text, candidate)
     tag = ev or f"[llm:{reason}]"
     return v, tag, c, "llm"

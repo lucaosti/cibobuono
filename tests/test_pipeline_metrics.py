@@ -7,7 +7,12 @@ import json
 import pytest
 
 from scripts.pipeline_executor import FinalizeResult
-from scripts.pipeline_metrics import METRICS_FILE, compute_run_metrics, record_run_metrics
+from scripts.pipeline_metrics import (
+    METRICS_FILE,
+    compute_run_metrics,
+    record_eval_metrics,
+    record_run_metrics,
+)
 
 
 def _result(**kw) -> FinalizeResult:
@@ -151,3 +156,39 @@ class TestRecordRunMetrics:
         record = record_run_metrics([])
         assert record["videos_processed"] == 0
         assert record["geocode_rate"] is None
+
+
+# ---------------------------------------------------------------------------
+# record_eval_metrics
+# ---------------------------------------------------------------------------
+
+
+class TestRecordEvalMetrics:
+    def test_writes_to_file(self, tmp_path, monkeypatch):
+        ef = tmp_path / "eval_metrics.json"
+        monkeypatch.setattr("scripts.pipeline_metrics.EVAL_METRICS_FILE", ef)
+        monkeypatch.setattr("scripts.pipeline_metrics.LOGS_DIR", tmp_path)
+        record = record_eval_metrics({"n": 5, "precision": 0.8, "recall": 0.7, "f1": 0.74})
+        assert record["n"] == 5
+        saved = json.loads(ef.read_text())
+        assert len(saved) == 1
+        assert saved[0]["precision"] == 0.8
+
+    def test_appends_and_keeps_extra_fields(self, tmp_path, monkeypatch):
+        ef = tmp_path / "eval_metrics.json"
+        monkeypatch.setattr("scripts.pipeline_metrics.EVAL_METRICS_FILE", ef)
+        monkeypatch.setattr("scripts.pipeline_metrics.LOGS_DIR", tmp_path)
+        record_eval_metrics({"n": 1}, with_llm=False)
+        record_eval_metrics({"n": 2}, with_llm=True)
+        saved = json.loads(ef.read_text())
+        assert len(saved) == 2
+        assert saved[1]["with_llm"] is True
+
+    def test_recovers_from_corrupted_file(self, tmp_path, monkeypatch):
+        ef = tmp_path / "eval_metrics.json"
+        ef.write_text("{not valid json")
+        monkeypatch.setattr("scripts.pipeline_metrics.EVAL_METRICS_FILE", ef)
+        monkeypatch.setattr("scripts.pipeline_metrics.LOGS_DIR", tmp_path)
+        record_eval_metrics({"n": 0})
+        saved = json.loads(ef.read_text())
+        assert len(saved) == 1

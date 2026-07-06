@@ -43,7 +43,11 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 │   ├── processed_videos.json       # Incrementality tracker
 │   ├── flagged_segments.json       # Low-confidence segments for review
 │   ├── skipped_videos.json         # Skipped videos (recipes, Shorts)
-│   └── corrections.json            # Manual hide/edit overrides (preserved by --reset)
+│   ├── corrections.json            # Manual hide/edit overrides (preserved by --reset)
+│   ├── voices.json                 # Per-channel recurring-voice registry (Perceptor)
+│   ├── perception.json             # Per-video audio/video perception records (Perceptor)
+│   ├── calibration.json            # Fitted Platt-scaling params (regenerated; absent until fitted)
+│   └── eval_set.json               # Hand-labeled gold set for the visit classifier eval harness
 │
 ├── scripts/                        # Pipeline modules (Python)
 │   ├── schemas.py                  # Pydantic models & validation
@@ -60,6 +64,9 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 │   ├── visit_classifier.py         # Italian rules + LLM yes/no for ambiguous cases
 │   ├── batch_visit_llm.py          # Batch LLM evaluation for NER candidates (GPU-optimised)
 │   ├── venue_discovery.py          # Holistic LLM venue discovery from full timestamped transcript
+│   ├── vote_aggregator.py          # Weighted log-odds fusion of Perceptor signals into visit confidence
+│   ├── calibrate_confidence.py     # Platt-scaling recalibration of confidence from corrections.json
+│   ├── eval_pipeline.py            # Precision/recall/F1 of the visit classifier against data/eval_set.json
 │   ├── extract_pipeline.py         # Orchestrator: NER → batch classify → detail LLM → cross-chunk filter → holistic merge
 │   ├── geocode_locales.py          # Nominatim geocoding (free, rate-limited, file-cached)
 │   ├── verify_locales.py           # OSM verification via Overpass API (anti-false-positive)
@@ -101,16 +108,19 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 │   │       └── StatusBar.tsx       # Loading/error states
 │   └── ...
 │
-├── tests/                          # Pytest test suite (394 tests)
+├── tests/                          # Pytest test suite (464 tests)
 │   ├── test_schemas.py             # Pydantic model validation
 │   ├── test_dedup.py               # Fuzzy dedup + haversine
 │   ├── test_chunks.py              # Chunking + timestamp helpers
 │   ├── test_extraction.py          # Food gate, LLM caching, locale validation, description hints
 │   ├── test_ner_candidates.py      # GLiNER candidates + parallel exception recovery
-│   ├── test_visit_classifier.py    # Italian rule classifier + venue name checks
+│   ├── test_visit_classifier.py    # Italian rule classifier + venue name checks + self-consistency ensemble
 │   ├── test_batch_visit_llm.py     # Batch LLM evaluation
 │   ├── test_venue_discovery.py     # Holistic LLM discovery + transcript formatting
-│   ├── test_extract_pipeline.py    # Full NER→classify→merge pipeline
+│   ├── test_extract_pipeline.py    # Full NER→classify→merge pipeline + Perceptor fusion + agreement bonus
+│   ├── test_vote_aggregator.py     # Perceptor OCR/speaker votes + log-odds confidence combination
+│   ├── test_calibrate_confidence.py # Platt-scaling fit/apply + save/load roundtrip
+│   ├── test_eval_pipeline.py       # Visit-classifier precision/recall/F1 harness
 │   ├── test_verify.py              # OSM/Overpass verification
 │   ├── test_geocode.py             # Geocoding cache logic + batch geocode
 │   ├── test_perceptor.py           # Novelty dedup, diarization, voice registry, stage guards
@@ -124,7 +134,7 @@ The web UI is **bilingual (English / Italiano)**: the language is auto-detected 
 │   ├── test_resource_monitor.py    # RAM/GPU/CPU monitoring
 │   ├── test_pipeline_control.py    # Pause/stop/status control
 │   ├── test_pipeline_executor.py   # City coherence, finalize, GPU/CPU overlap
-│   ├── test_pipeline_metrics.py    # Run metrics aggregation + append
+│   ├── test_pipeline_metrics.py    # Run metrics + eval metrics aggregation + append
 │   ├── test_review_queue.py        # Pending reviews + reports
 │   ├── test_dashboard.py           # Dashboard state + snapshot
 │   ├── test_transcribe.py          # VTT parser + Whisper backend selection
@@ -233,6 +243,69 @@ All JSON files are **normalized** — no nested arrays of IDs inside records. Vi
 | `reason`       | string | Reason for skipping (recipe keyword, Short)|
 | `skipped_date` | string | YYYY-MM-DD                                 |
 
+### corrections.json
+
+| Field       | Type    | Description                                          |
+|-------------|---------|-------------------------------------------------------|
+| `locale_id` | string  | FK → locales.json                                     |
+| `type`      | enum    | `hide` (false positive) / `edit` (field override)     |
+| `reason`    | string? | Human-readable reason                                 |
+| `overrides` | object? | For `type=edit`: `name`/`city`/`rating`/`sentiment` overrides |
+
+Preserved across `--reset` (cleared only with `--reset-all-data`). `hide` entries are also the weak-supervision ground truth `scripts/calibrate_confidence.py` fits against — see [Confidence & Redundancy](#confidence--redundancy).
+
+### voices.json
+
+Per-channel registry of recurring speaker voices, written by `scripts/perceptor_audio.py`. One entry per detected voice:
+
+| Field         | Type     | Description                                          |
+|---------------|----------|-------------------------------------------------------|
+| `voice_id`    | string   | `voice_{channel_id}_{NNN}`                             |
+| `channel_id`  | string   | FK → channels.json                                     |
+| `centroid`    | float[]  | Running-mean 192-dim TitaNet embedding                 |
+| `n_samples`   | int      | Number of videos merged into the centroid              |
+| `videos`      | string[] | Video IDs this voice was seen in                       |
+| `created_at`  | string   | ISO-8601 timestamp                                     |
+| `updated_at`  | string   | ISO-8601 timestamp                                     |
+
+### perception.json
+
+One record per video processed with `--perceptor`, written by `scripts/perceptor.py`:
+
+| Field        | Type    | Description                                             |
+|--------------|---------|-----------------------------------------------------------|
+| `video_id`   | string  | FK → videos.json                                          |
+| `channel_id` | string  | FK → channels.json                                         |
+| `status`     | enum    | `ok` / `partial` / `errored`                               |
+| `error`      | string? | Truncated error summary if not fully `ok`                  |
+| `asr_backend`| string  | Backend used for this video (`mlx_whisper`/`faster_whisper`)|
+| `audio`      | object? | VAD segments, per-speaker talk time + matched `voice_id`, per-transcript-segment speaker labels |
+| `video`      | object? | Frames sampled/captioned, novelty-deduped VLM captions with timestamps |
+
+`extract_pipeline.py` reads this record per video (`get_perception`) and feeds its captions/diarization into `scripts/vote_aggregator.py` as independent votes on the visit/mention decision — see [Confidence & Redundancy](#confidence--redundancy).
+
+### calibration.json
+
+Written by `scripts/calibrate_confidence.py`; absent until the script has been run once.
+
+| Field       | Type   | Description                                              |
+|-------------|--------|-------------------------------------------------------------|
+| `fitted`    | bool   | Whether enough labeled data existed to fit a calibration     |
+| `a`, `b`    | float  | Platt-scaling params (present only if `fitted=true`)         |
+| `n_samples` | int    | Number of (confidence, outcome) pairs the fit used            |
+
+### eval_set.json
+
+Hand-labeled gold set consumed by `scripts/eval_pipeline.py`. Plain JSON list, starts empty until populated by hand:
+
+| Field            | Type    | Description                                    |
+|------------------|---------|--------------------------------------------------|
+| `candidate_name` | string  | Venue name as it appears in the transcript window |
+| `window_text`    | string  | Transcript excerpt around the mention              |
+| `start_time`     | float?  | Mention time in seconds (default 0.0)              |
+| `ner_score`      | float?  | Simulated NER span confidence (default 0.6)        |
+| `gold_label`     | enum    | `visit` / `mention` — the correct answer            |
+
 ## Entity Relationships
 
 ```
@@ -318,6 +391,8 @@ Full timestamped transcript
 
 **Batch LLM evaluation** (`batch_visit_llm.py`): All NER candidates confirmed as visits are sent to the LLM in a single batched call that extracts `rating` and `sentiment` for every visit at once. On CPU-only systems this falls back to sequential calls.
 
+**[C] Merge + confidence** now goes beyond "keep the higher-confidence row": cross-source agreement, self-consistency voting on ambiguous cases, and Perceptor's audio/video signals all feed into the final confidence — see [Confidence & Redundancy](#confidence--redundancy) below.
+
 **Chunk parameters**: 90 s with 15-second overlap was chosen to balance two needs: a typical restaurant visit in these videos spans 60–180 s of commentary (so 90 s is a good fit), and the overlap prevents a mention straddling a boundary from being missed.
 
 **Rating format**: The `rating` field stores the blogger's exact expressed score as a string:
@@ -343,6 +418,20 @@ The numeric core must be 1–10; the Pydantic validator rejects values outside t
 | NER | `knowledgator/gliner-x-large-v0.5` | Largest available zero-shot NER; mT5 backbone handles Italian venue names well with no fine-tuning |
 | LLM | `Qwen2.5-14B-Instruct-Q4_K_M.gguf` | Fully CUDA-offloadable at 8.4 GB; strong Italian instruction following and structured-JSON output; tier-27B default (`gemma-3-27b`) requires HF auth |
 | Geocoding | Nominatim + Overpass (OSM) | No paid API; Nominatim covers Italian cities well; Overpass `amenity=*` verification is the strongest anti-false-positive gate |
+
+### Confidence & Redundancy
+
+Every classification step above (rules, LLM arbiter, batch LLM, holistic discovery) used to run **once** per candidate, and results were merged by "keep whichever confidence is higher" — agreement between independent sources was thrown away, and Perceptor's audio/video signals (captions, diarization) were computed but never consulted. Four mechanisms close that gap, all evaluated against the Condorcet-jury intuition that *independent* agreeing signals are more informative than re-asking a single correlated one:
+
+1. **Cross-source agreement bonus** (`extract_pipeline._merge_extraction_rows`): when the chunk-level NER+rules pipeline and the holistic LLM discovery pass (`venue_discovery.py`) independently agree on the same venue, the merged row's confidence is boosted (`_SOURCE_AGREEMENT_BONUS`) instead of only keeping the higher of the two.
+
+2. **Gated self-consistency for genuinely ambiguous cases** (`visit_classifier.classify_with_llm_ensemble`): when the rule engine's own reason is truly ambiguous (`conflict_patterns`, `no_clear_signal` — both a mention and a visit pattern fire, or neither), 3 diversified LLM samples vote instead of 1. (`empty_window` — no transcript text at all — is deliberately excluded: there's no evidence for 3 samples to disagree over, so it stays a single call.) (baseline greedy, a higher-temperature resample, and a "devil's advocate" reframing that argues the mention case first). Confidence scales with how much the samples agreed. This only fires for the ambiguous subset — most `unsure` cases (e.g. a visit pattern with weak food evidence) still resolve with a single call, since 3× the LLM cost is only worth it where the rules genuinely can't decide.
+
+3. **Perceptor signal fusion** (`vote_aggregator.py`): the only *independent-modality* voters in the pipeline. A nearby VLM caption mentioning the venue name/signage text votes "visit"; the diarized speaker at the candidate's timestamp being the channel's dominant/registered voice (heuristic proxy for "the host") votes "visit", while a different speaker (guest/bystander) votes "mention" — catching a guest describing their own visit being misread as the host's. Votes combine with the text-pipeline confidence via a weighted log-odds sum (`combine_confidence`), not a naive average; Perceptor voters currently carry a lower weight than the text pipeline because there isn't yet enough corrected-outcome history to validate their reliability. No-op (falls back to the plain text confidence) when Perceptor is disabled or has nothing to say near that timestamp.
+
+4. **Confidence recalibration from corrections** (`calibrate_confidence.py`): the hand-tuned linear blend above has never been checked against real outcomes. `python -m scripts.calibrate_confidence` fits a 2-parameter Platt scaling (`data/calibration.json`) from `data/corrections.json`'s `hide` entries (confirmed false positives) vs. `data/visits.json`'s `llm_confidence`. Deliberately *not* isotonic regression: that needs far more labeled points than a slowly-growing corrections file will have for a while, and a 2-parameter fit degrades gracefully on small data. Below `MIN_SAMPLES` (30) labeled pairs, calibration stays unfitted and the linear formula is used unchanged.
+
+Measuring whether any of this actually helps: `python -m scripts.eval_pipeline [--with-llm]` runs the visit classifier against a hand-labeled gold set (`data/eval_set.json`, starts empty — see [Data Model](#eval_setjson)) and reports precision/recall/F1, trend-tracked in `logs/eval_metrics.json` via `pipeline_metrics.record_eval_metrics`. Run it before and after enabling a redundancy mechanism to attribute the gain (or confirm there isn't one) instead of judging by feel.
 
 ### Pipeline Options
 
@@ -388,7 +477,9 @@ can be *heard* and *seen*, using the best backend the machine supports:
 Results land in `data/perception.json` (per video: VAD segments, speaker
 labels with talk time, matched channel voices, novelty-frame captions with
 timestamps). The stage is best-effort: any perception failure is recorded and
-the main pipeline continues. Setup:
+the main pipeline continues. When enabled, these signals also feed back into
+extraction confidence as independent votes — see [Confidence & Redundancy](#confidence--redundancy).
+Setup:
 
 ```bash
 python -m scripts.setup_models --perceptor-only   # ONNX models + VLM cache warm
@@ -700,7 +791,11 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 │   ├── processed_videos.json       # Tracker per incrementalità
 │   ├── flagged_segments.json       # Segmenti a bassa confidence per review
 │   ├── skipped_videos.json         # Video saltati (ricette, Shorts)
-│   └── corrections.json            # Override manuali hide/edit (preservato da --reset)
+│   ├── corrections.json            # Override manuali hide/edit (preservato da --reset)
+│   ├── voices.json                 # Registro voci ricorrenti per canale (Perceptor)
+│   ├── perception.json             # Record di percezione audio/video per video (Perceptor)
+│   ├── calibration.json            # Parametri Platt-scaling fittati (rigenerato; assente finché non fittato)
+│   └── eval_set.json               # Gold set etichettato a mano per l'harness di valutazione del classificatore
 │
 ├── scripts/                        # Moduli della pipeline (Python)
 │   ├── schemas.py                  # Modelli Pydantic e validazione
@@ -717,6 +812,9 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 │   ├── visit_classifier.py         # Regole italiane + LLM sì/no se ambiguo
 │   ├── batch_visit_llm.py          # Valutazione LLM in batch dei candidati NER (ottimizzato GPU)
 │   ├── venue_discovery.py          # Discovery olistica LLM su trascrizione completa con timestamp
+│   ├── vote_aggregator.py          # Fusione log-odds pesata dei segnali Perceptor nella confidenza visita
+│   ├── calibrate_confidence.py     # Ricalibrazione Platt-scaling della confidenza da corrections.json
+│   ├── eval_pipeline.py            # Precision/recall/F1 del classificatore visite su data/eval_set.json
 │   ├── extract_pipeline.py         # Orchestratore: NER → batch classify → LLM dettagli → filtro cross-chunk → merge olistico
 │   ├── geocode_locales.py          # Geocoding Nominatim (gratuito, rate-limited, cache su file)
 │   ├── verify_locales.py           # Verifica OSM via Overpass API (anti-falsi positivi)
@@ -758,16 +856,19 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 │   │       └── StatusBar.tsx       # Stati di caricamento/errore
 │   └── ...
 │
-├── tests/                          # Suite di test pytest (394 test)
+├── tests/                          # Suite di test pytest (464 test)
 │   ├── test_schemas.py             # Validazione modelli Pydantic
 │   ├── test_dedup.py               # Dedup fuzzy + haversine
 │   ├── test_chunks.py              # Chunking + helper timestamp
 │   ├── test_extraction.py          # Gate food, caching LLM, validazione locale, hint descrizione
 │   ├── test_ner_candidates.py      # Candidati GLiNER + recovery eccezioni parallele
-│   ├── test_visit_classifier.py    # Classificatore regole italiane + controlli nome locale
+│   ├── test_visit_classifier.py    # Classificatore regole italiane + controlli nome locale + ensemble self-consistency
 │   ├── test_batch_visit_llm.py     # Valutazione LLM in batch
 │   ├── test_venue_discovery.py     # Discovery olistica LLM + formattazione trascrizione
-│   ├── test_extract_pipeline.py    # Pipeline completa NER→classify→merge
+│   ├── test_extract_pipeline.py    # Pipeline completa NER→classify→merge + fusione Perceptor + bonus accordo
+│   ├── test_vote_aggregator.py     # Voti OCR/speaker Perceptor + combinazione log-odds della confidenza
+│   ├── test_calibrate_confidence.py # Fit/apply Platt-scaling + roundtrip save/load
+│   ├── test_eval_pipeline.py       # Harness precision/recall/F1 del classificatore visite
 │   ├── test_verify.py              # Verifica OSM/Overpass
 │   ├── test_geocode.py             # Logica cache geocoding + batch geocode
 │   ├── test_perceptor.py           # Novelty dedup, diarizzazione, registro voci, guardie stage
@@ -781,7 +882,7 @@ La web app è **bilingue (Italiano / English)**: la lingua viene rilevata automa
 │   ├── test_resource_monitor.py    # Monitoraggio RAM/GPU/CPU
 │   ├── test_pipeline_control.py    # Controllo pause/stop/stato
 │   ├── test_pipeline_executor.py   # Coerenza geografica, finalize, overlap GPU/CPU
-│   ├── test_pipeline_metrics.py    # Aggregazione metriche run + append
+│   ├── test_pipeline_metrics.py    # Aggregazione metriche run + eval metrics + append
 │   ├── test_review_queue.py        # Revisioni in attesa + segnalazioni
 │   ├── test_dashboard.py           # Stato dashboard + snapshot
 │   ├── test_transcribe.py          # Parser VTT + selezione backend Whisper
@@ -890,6 +991,69 @@ Tutti i file JSON sono **normalizzati** — nessun array di ID annidato nei reco
 | `reason`       | string | Motivo dello skip (keyword ricetta, Short)            |
 | `skipped_date` | string | YYYY-MM-DD                                           |
 
+### corrections.json
+
+| Campo       | Tipo    | Descrizione                                              |
+|-------------|---------|-----------------------------------------------------------|
+| `locale_id` | string  | FK → locales.json                                          |
+| `type`      | enum    | `hide` (falso positivo) / `edit` (override di un campo)    |
+| `reason`    | string? | Motivo leggibile                                           |
+| `overrides` | object? | Per `type=edit`: override di `name`/`city`/`rating`/`sentiment` |
+
+Preservato tra i `--reset` (azzerato solo con `--reset-all-data`). Le voci `hide` sono anche la ground truth debole su cui `scripts/calibrate_confidence.py` fitta la calibrazione — vedi [Confidenza e Ridondanza](#confidenza-e-ridondanza).
+
+### voices.json
+
+Registro per canale delle voci ricorrenti, scritto da `scripts/perceptor_audio.py`. Una voce per ogni speaker rilevato:
+
+| Campo         | Tipo     | Descrizione                                            |
+|---------------|----------|------------------------------------------------------------|
+| `voice_id`    | string   | `voice_{channel_id}_{NNN}`                                  |
+| `channel_id`  | string   | FK → channels.json                                           |
+| `centroid`    | float[]  | Embedding TitaNet 192-dim a media mobile                     |
+| `n_samples`   | int      | Numero di video uniti nel centroide                          |
+| `videos`      | string[] | Video ID in cui questa voce è comparsa                       |
+| `created_at`  | string   | Timestamp ISO-8601                                           |
+| `updated_at`  | string   | Timestamp ISO-8601                                           |
+
+### perception.json
+
+Un record per ogni video processato con `--perceptor`, scritto da `scripts/perceptor.py`:
+
+| Campo        | Tipo    | Descrizione                                                |
+|--------------|---------|-----------------------------------------------------------------|
+| `video_id`   | string  | FK → videos.json                                                 |
+| `channel_id` | string  | FK → channels.json                                                |
+| `status`     | enum    | `ok` / `partial` / `errored`                                       |
+| `error`      | string? | Riassunto troncato dell'errore se non `ok`                         |
+| `asr_backend`| string  | Backend usato per questo video (`mlx_whisper`/`faster_whisper`)    |
+| `audio`      | object? | Segmenti VAD, tempo di parola per speaker + `voice_id` associato, speaker per segmento di trascrizione |
+| `video`      | object? | Frame campionati/caption, caption VLM deduplicate per novelty con timestamp |
+
+`extract_pipeline.py` legge questo record per video (`get_perception`) e passa le sue caption/diarizzazione a `scripts/vote_aggregator.py` come voti indipendenti sulla decisione visita/menzione — vedi [Confidenza e Ridondanza](#confidenza-e-ridondanza).
+
+### calibration.json
+
+Scritto da `scripts/calibrate_confidence.py`; assente finché lo script non viene eseguito almeno una volta.
+
+| Campo       | Tipo   | Descrizione                                                 |
+|-------------|--------|-------------------------------------------------------------------|
+| `fitted`    | bool   | Se c'erano abbastanza dati etichettati per fittare una calibrazione |
+| `a`, `b`    | float  | Parametri Platt-scaling (presenti solo se `fitted=true`)            |
+| `n_samples` | int    | Numero di coppie (confidenza, esito) usate per il fit                |
+
+### eval_set.json
+
+Gold set etichettato a mano usato da `scripts/eval_pipeline.py`. Lista JSON semplice, parte vuota finché non viene popolata a mano:
+
+| Campo            | Tipo    | Descrizione                                                |
+|------------------|---------|-------------------------------------------------------------------|
+| `candidate_name` | string  | Nome del locale come compare nella finestra di trascrizione         |
+| `window_text`    | string  | Estratto della trascrizione attorno alla menzione                   |
+| `start_time`     | float?  | Momento della menzione in secondi (default 0.0)                     |
+| `ner_score`      | float?  | Confidenza NER simulata dello span (default 0.6)                    |
+| `gold_label`     | enum    | `visit` / `mention` — la risposta corretta                          |
+
 ## Relazioni tra Entità
 
 ```
@@ -975,6 +1139,8 @@ Trascrizione completa con timestamp
 
 **Valutazione LLM in batch** (`batch_visit_llm.py`): Tutti i candidati NER confermati come visite vengono inviati all'LLM in una singola chiamata batch che estrae `rating` e `sentiment` per ogni visita in una volta sola.
 
+**[C] Merge + confidenza** ora va oltre "tieni la riga con confidenza più alta": accordo tra fonti, voto self-consistency sui casi ambigui e i segnali audio/video di Perceptor concorrono tutti alla confidenza finale — vedi [Confidenza e Ridondanza](#confidenza-e-ridondanza) più sotto.
+
 **Parametri dei chunk**: 90 s con 15 s di overlap garantisce che una menzione a cavallo di un confine venga catturata. Una tipica visita a un ristorante in questi video dura 60–180 s di commento, quindi 90 s è una finestra naturale.
 
 **Formato del voto**: Il campo `rating` memorizza il punteggio esatto espresso dal blogger come stringa:
@@ -1000,6 +1166,20 @@ Il core numerico deve essere compreso tra 1 e 10; il validator Pydantic rifiuta 
 | NER | `knowledgator/gliner-x-large-v0.5` | Il più grande GLiNER zero-shot disponibile; backbone mT5 multilingue, nessun fine-tuning richiesto |
 | LLM | `Qwen2.5-14B-Instruct-Q4_K_M.gguf` | Full CUDA offload a 8.4 GB; ottimo italiano e output JSON strutturato; il tier 27B default (`gemma-3-27b`) richiede autenticazione HF |
 | Geocoding | Nominatim + Overpass (OSM) | Nessuna API a pagamento; Nominatim copre bene le città italiane; la verifica Overpass `amenity=*` è il filtro anti-falsi-positivi più efficace |
+
+### Confidenza e Ridondanza
+
+Ogni fase di classificazione sopra descritta (regole, arbiter LLM, LLM in batch, discovery olistica) girava **una sola volta** per candidato, e i risultati venivano uniti tenendo "la confidenza più alta" — l'accordo tra fonti indipendenti veniva scartato, e i segnali audio/video di Perceptor (caption, diarizzazione) venivano calcolati ma mai consultati. Quattro meccanismi colmano questo divario, tutti valutati secondo l'intuizione del teorema della giuria di Condorcet: segnali *indipendenti* che concordano sono più informativi che richiedere di nuovo a un unico votante correlato:
+
+1. **Bonus di accordo tra fonti** (`extract_pipeline._merge_extraction_rows`): quando la pipeline NER+regole a chunk e il passaggio di discovery olistica LLM (`venue_discovery.py`) concordano indipendentemente sullo stesso locale, la confidenza della riga unita viene alzata (`_SOURCE_AGREEMENT_BONUS`) invece di tenere solo la più alta delle due.
+
+2. **Self-consistency selettiva per i casi realmente ambigui** (`visit_classifier.classify_with_llm_ensemble`): quando il motivo del rule engine è genuinamente ambiguo (`conflict_patterns`, `no_clear_signal` — scattano sia un pattern di menzione sia uno di visita, oppure nessuno dei due), 3 campioni LLM diversificati votano invece di 1. (`empty_window` — nessun testo di trascrizione disponibile — è deliberatamente escluso: non c'è evidenza su cui i 3 campioni possano dissentire in modo utile, quindi resta una singola chiamata.) (baseline greedy, un ricampionamento a temperatura più alta, e una riformulazione "avvocato del diavolo" che argomenta prima il caso menzione). La confidenza scala in base a quanto i campioni concordano. Questo scatta solo per il sottoinsieme ambiguo — la maggior parte dei casi "unsure" (es. un pattern di visita con evidenza food debole) si risolve ancora con una singola chiamata, perché il costo 3x dell'LLM vale solo dove le regole non riescono davvero a decidere.
+
+3. **Fusione dei segnali Perceptor** (`vote_aggregator.py`): gli unici votanti a *modalità indipendente* della pipeline. Una caption VLM vicina che menziona il nome del locale/testo di insegna vota "visita"; lo speaker diarizzato al timestamp del candidato che è la voce dominante/registrata del canale (proxy euristico per "l'host") vota "visita", mentre uno speaker diverso (ospite/bystander) vota "menzione" — intercettando un ospite che descrive la propria visita letta erroneamente come visita dell'host. I voti si combinano con la confidenza della pipeline testuale tramite una somma log-odds pesata (`combine_confidence`), non una media ingenua; i votanti Perceptor hanno oggi un peso più basso della pipeline testuale perché non c'è ancora abbastanza storico di esiti corretti per validarne l'affidabilità. Non fa nulla (torna alla sola confidenza testuale) quando Perceptor è disabilitato o non ha nulla da dire vicino a quel timestamp.
+
+4. **Ricalibrazione della confidenza dalle correzioni** (`calibrate_confidence.py`): la formula lineare tarata a mano sopra non è mai stata verificata contro esiti reali. `python -m scripts.calibrate_confidence` fitta un Platt scaling a 2 parametri (`data/calibration.json`) dalle voci `hide` di `data/corrections.json` (falsi positivi confermati) contro `llm_confidence` di `data/visits.json`. Deliberatamente *non* isotonic regression: richiede molti più punti etichettati di quanti ne avrà per un po' un file corrections a crescita lenta, e un fit a 2 parametri degrada meglio su pochi dati. Sotto `MIN_SAMPLES` (30) coppie etichettate, la calibrazione resta non fittata e la formula lineare resta invariata.
+
+Per misurare se tutto questo aiuta davvero: `python -m scripts.eval_pipeline [--with-llm]` esegue il classificatore visite contro un gold set etichettato a mano (`data/eval_set.json`, parte vuoto — vedi [Modello Dati](#eval_setjson)) e riporta precision/recall/F1, tracciati nel tempo in `logs/eval_metrics.json` via `pipeline_metrics.record_eval_metrics`. Eseguirlo prima e dopo aver abilitato un meccanismo di ridondanza per attribuire il guadagno (o confermare che non c'è) invece di giudicare a sensazione.
 
 ### Opzioni della Pipeline
 
@@ -1045,7 +1225,9 @@ e si *vede*, scegliendo il backend migliore per la macchina:
 I risultati finiscono in `data/perception.json` (per video: segmenti VAD,
 speaker con tempo di parola, voci del canale riconosciute, caption dei frame
 nuovi con timestamp). Lo stage è best-effort: un errore di percezione viene
-registrato e la pipeline principale prosegue. Setup:
+registrato e la pipeline principale prosegue. Quando abilitati, questi segnali
+tornano indietro anche nella confidenza di estrazione come voti indipendenti —
+vedi [Confidenza e Ridondanza](#confidenza-e-ridondanza). Setup:
 
 ```bash
 python -m scripts.setup_models --perceptor-only   # modelli ONNX + warm cache VLM
