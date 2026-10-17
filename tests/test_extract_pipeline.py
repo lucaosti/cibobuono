@@ -71,6 +71,73 @@ def test_pipeline_single_chunk_protected_keeps_visit():
     assert any(e["locale_name"] == "Peppe Mangione" for e in ext)
 
 
+def _intel_with_hints(hints, city="Roma"):
+    class FakeIntel:
+        venue_hints = hints
+        series_name = ""
+        video_type = "single_venue"
+        title_rating = None
+        skip_reason = ""
+        location_hint = ""
+
+    FakeIntel.city = city
+    return FakeIntel()
+
+
+def test_hint_not_in_transcript_is_flagged_not_published():
+    """Video zYE6gyTO9Mw: the title hint 'VIA SANNIO' never appears in the
+    speech, yet it was promoted straight into extractions. A hint that the
+    transcript does not corroborate is review material, not a visit."""
+    from scripts.extract_pipeline import _promote_venue_hints
+
+    transcript = {"segments": [{"start": 0, "end": 10, "text": "Oggi mangiamo la pizza al taglio qua sotto casa."}]}
+    intel = _intel_with_hints([{"name": "VIA SANNIO", "source": "title", "confidence": "high"}])
+    extractions: list = []
+    flagged: list = []
+    _promote_venue_hints(intel, [], extractions, flagged, None, transcript=transcript)
+    assert extractions == []
+    assert [f["locale_name"] for f in flagged] == ["VIA SANNIO"]
+    assert flagged[0]["_flag_reason"] == "hint_not_in_transcript"
+
+
+def test_hint_corroborated_by_transcript_is_promoted():
+    from scripts.extract_pipeline import _promote_venue_hints
+
+    transcript = {"segments": [{"start": 0, "end": 10, "text": "Siamo arrivati al Girasole, il ristorante dei camionisti."}]}
+    intel = _intel_with_hints([{"name": "Il Girasole", "source": "chapter", "confidence": "very_high", "start_time": 30}])
+    extractions: list = []
+    flagged: list = []
+    _promote_venue_hints(intel, [], extractions, flagged, None, transcript=transcript)
+    assert [e["locale_name"] for e in extractions] == ["Il Girasole"]
+    assert flagged == []
+
+
+def test_rule_visit_without_llm_is_flagged_not_published():
+    """With no LLM available the only evidence is a regex hit: that is not
+    enough to publish a visit. It must land in flagged for review."""
+    chunks = [
+        {
+            "chunk_index": 0,
+            "start_time": 0.0,
+            "start_timestamp": "0:00",
+            "end_timestamp": "0:45",
+            "text": "Siamo da Trattoria Rossi e assaggiamo la carbonara.",
+            "segment_timestamps": [(0.0, "Siamo da Trattoria Rossi e assaggiamo la carbonara.")],
+        }
+    ]
+    transcript = {"segments": [{"start": 0, "end": 10, "text": "Siamo da Trattoria Rossi e assaggiamo la carbonara."}]}
+    cand = __import__("scripts.ner_candidates", fromlist=["Candidate"]).Candidate(
+        name="Trattoria Rossi", label="restaurant", start_char=9, end_char=24,
+        start_time=0.0, chunk_index=0, ner_score=0.9,
+    )
+    with patch("scripts.extract_pipeline.extract_all_chunks_candidates", return_value={0: ([cand], [])}):
+        with patch("scripts.extract_pipeline.get_llm", return_value=None):
+            with patch("scripts.extract_pipeline.get_perception", return_value=None):
+                ext, flagged = extract_from_video("vid_nollm", chunks, transcript=transcript)
+    assert ext == []
+    assert any(f["locale_name"] == "Trattoria Rossi" and f["_flag_reason"] == "no_llm_verification" for f in flagged)
+
+
 def test_pipeline_drops_belgium_name_drop_without_signals():
     chunks = [
         {
@@ -286,8 +353,10 @@ class TestPerceptorSignalFusion():
                     with patch(
                         "scripts.extract_pipeline.get_perception", return_value=perception_record
                     ) as mock_get_perception:
-                        ext, _ = extract_from_video(
+                        ext, flagged = extract_from_video(
                             "v_perceptor", chunks, transcript=transcript
                         )
         mock_get_perception.assert_called_once_with("v_perceptor")
-        assert any(e["locale_name"] == "Roscioli" for e in ext)
+        # Without an LLM a rule hit is review material, so the candidate lands
+        # in flagged; what matters here is that the perception record was read.
+        assert any(r["locale_name"] == "Roscioli" for r in ext + flagged)

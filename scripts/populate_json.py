@@ -104,6 +104,8 @@ def create_flagged_segment(
             "single_chunk_visit": FlagReason.AMBIGUOUS_LOCALE.value,
             "low_confidence": FlagReason.LOW_CONFIDENCE.value,
             "hint_low_confidence": FlagReason.LOW_CONFIDENCE.value,
+            "hint_not_in_transcript": FlagReason.AMBIGUOUS_LOCALE.value,
+            "no_llm_verification": FlagReason.LOW_CONFIDENCE.value,
             "possible_locale_mention_low_confidence": FlagReason.LOW_CONFIDENCE.value,
         }
         if flag in reason_map:

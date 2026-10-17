@@ -67,17 +67,22 @@ class TestAnalyzeTitleForni:
         assert intel.series_name == "Forni criminali"
         assert intel.city == "CENTOCELLE"
 
-    def test_pizza_taglio_criminale_extracts_venue_hint(self):
-        """'Pizza a taglio criminale VENUE' → venue hint from title."""
+    def test_pizza_taglio_criminale_title_is_a_location_not_a_venue(self):
+        """'Pizza a taglio criminale X': X is the street/neighbourhood of the
+        episode (Via Sannio, Colle del Sole, Appio Claudio), never the shop's
+        proper name. It must become a location hint, not a venue hint —
+        promoting it as a venue produced false positives like 'VIA SANNIO'."""
         intel = analyze_title("Pizza a taglio criminale COLLE DEL SOLE")
         assert intel.video_type == "single_venue"
         assert intel.series_name == "Pizza a taglio criminale"
-        assert any("COLLE DEL SOLE" in h["name"] for h in intel.venue_hints)
+        assert intel.venue_hints == []
+        assert intel.location_hint == "COLLE DEL SOLE"
 
     def test_pizza_taglio_criminale_regina_margherita(self):
         intel = analyze_title("Pizza a taglio criminale REGINA MARGHERITA")
         assert intel.video_type == "single_venue"
-        assert any("REGINA MARGHERITA" in h["name"] for h in intel.venue_hints)
+        assert intel.venue_hints == []
+        assert intel.location_hint == "REGINA MARGHERITA"
 
 
 class TestAnalyzeTitleCosaMangia:
@@ -244,6 +249,41 @@ class TestAnalyzeChapters:
         intel = analyze_chapters(chapters, self._base_intel())
         assert len(intel.venue_hints) == 1
         assert "start_time" not in intel.venue_hints[0]
+
+    def test_generic_or_structural_chapters_rejected(self):
+        """Real chapter titles seen on the catalogued channels that are NOT
+        venues: YouTube placeholder, dish/recipe sections, area names."""
+        chapters = [
+            {"title": "<Untitled Chapter 1>", "start_time": 0},
+            {"title": "Introduzione", "start_time": 5},
+            {"title": "Pizza surgelata", "start_time": 60},
+            {"title": "Ricetta facile", "start_time": 120},
+            {"title": "Ricetta difficile", "start_time": 180},
+            {"title": "Quartiere temma", "start_time": 240},
+            {"title": "Conclusione", "start_time": 300},
+        ]
+        intel = analyze_chapters(chapters, self._base_intel())
+        assert intel.venue_hints == []
+
+    def test_real_venue_chapters_accepted(self):
+        chapters = [
+            {"title": "Il Girasole", "start_time": 10},
+            {"title": "El Jalapeno", "start_time": 20},
+            {"title": "Pad Thai Kung", "start_time": 30},
+            {"title": "Kapani Market", "start_time": 40},
+            {"title": "Pizzeria Napoli", "start_time": 50},
+        ]
+        intel = analyze_chapters(chapters, self._base_intel())
+        names = [h["name"] for h in intel.venue_hints]
+        assert names == ["Il Girasole", "El Jalapeno", "Pad Thai Kung", "Kapani Market", "Pizzeria Napoli"]
+
+    def test_chapter_with_address_is_split(self):
+        """'Name, street, city' chapters carry the address: keep it separately."""
+        chapters = [{"title": "Okonomiyaki Parco, 1-1 Tsurufukuincho, Nara", "start_time": 60}]
+        intel = analyze_chapters(chapters, self._base_intel())
+        assert len(intel.venue_hints) == 1
+        assert intel.venue_hints[0]["name"] == "Okonomiyaki Parco"
+        assert intel.venue_hints[0]["address"] == "1-1 Tsurufukuincho, Nara"
 
 
 class TestParseDescriptionTimestamps:

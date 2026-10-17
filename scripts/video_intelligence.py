@@ -33,6 +33,7 @@ class VideoIntel:
     skip_reason: str = ""             # non-empty → video should be skipped
     series_name: str = ""             # e.g. "Hit di Franchino", "Forni criminali"
     title_rating: str | None = None   # rating extracted from title (e.g., "10" from "da DIECI")
+    location_hint: str = ""           # street / neighbourhood named in the title (not a venue name)
 
 
 # ── Title patterns (channel-specific) ────────────────────────────────────
@@ -149,11 +150,14 @@ def analyze_title(title: str) -> VideoIntel:
     # "Pizza a taglio criminale VENUE" — single venue, city unknown from title
     m = _PIZZA_TAGLIO_CRIMINALE.match(title)
     if m:
-        venue_name = m.group(1).strip()
+        # The title names WHERE the episode is filmed (Via Sannio, Colle del
+        # Sole, Appio Claudio), not the shop. Keep it as a location hint for
+        # geocoding / prompts; the venue name must come from speech or screen.
+        location = m.group(1).strip()
         intel.video_type = "single_venue"
         intel.series_name = "Pizza a taglio criminale"
-        intel.venue_hints = [{"name": venue_name, "source": "title", "confidence": "high"}]
-        logger.info(f"Title → pizza al taglio venue: '{venue_name}'")
+        intel.location_hint = location
+        logger.info(f"Title → pizza al taglio episode at '{location}'")
         return intel
 
     # "CITY criminale"
@@ -362,19 +366,75 @@ _NON_VENUE_CHAPTER_WORDS = frozenset({
 })
 
 
+# Chapter titles that open with these words describe a SECTION of the video
+# (a recipe step, an area, an episode part), never a business.
+_CHAPTER_SECTION_WORDS = frozenset({
+    "ricetta", "ricette", "quartiere", "zona", "parte", "capitolo", "episodio",
+    "introduzione", "conclusione", "conclusioni", "verdetto", "voto", "voti",
+    "classifica", "degustazione", "assaggio", "assaggi", "arrivo", "arriviamo",
+    "untitled",
+})
+
+
 def _is_chapter_venue_name(title: str) -> bool:
-    """Return True if a chapter title looks like a venue name, not navigation noise."""
+    """Return True if a chapter title looks like a venue name, not navigation noise.
+
+    Chapter and description-timestamp hints are trusted enough to bypass OSM
+    verification downstream, so a generic section label ("Pizza surgelata",
+    "Ricetta facile", "<Untitled Chapter 1>") that slips through becomes a
+    published false positive. Require at least one capitalized token that is
+    neither a food word, a venue-type word nor an article — or a venue-type
+    word followed by any other capitalized token ("Pizzeria Napoli").
+    """
+    from scripts.extract_locales import GENERIC_WORDS, _FILLER_WORDS
+    from scripts.visit_classifier import NON_VENUE_TERMS
+
     t = title.strip()
     if len(t) < 3 or len(t) > 80:
+        return False
+    if t.startswith("<") and t.endswith(">"):
         return False
     tl = t.lower()
     if tl in _NON_VENUE_CHAPTER_WORDS:
         return False
     if re.fullmatch(r"[\d:#\s]+", t):
         return False
-    if re.fullmatch(r"\d+", t):
+    tokens = re.findall(r"[\wÀ-ÿ'’]+", t)
+    if not tokens:
         return False
-    return True
+    if tokens[0].lower() in _CHAPTER_SECTION_WORDS or tokens[0].lower() in _NON_VENUE_CHAPTER_WORDS:
+        return False
+
+    def _is_proper(tok: str) -> bool:
+        low = tok.lower()
+        return (
+            tok[:1].isupper()
+            and low not in NON_VENUE_TERMS
+            and low not in GENERIC_WORDS
+            and low not in _FILLER_WORDS
+        )
+
+    if any(_is_proper(tok) for tok in tokens):
+        return True
+    has_type_word = any(tok.lower() in GENERIC_WORDS for tok in tokens)
+    other_caps = any(tok[:1].isupper() and tok.lower() not in GENERIC_WORDS for tok in tokens)
+    return has_type_word and other_caps
+
+
+def _split_chapter_name_address(raw: str) -> tuple[str, str]:
+    """'Okonomiyaki Parco, 1-1 Tsurufukuincho, Nara' → ('Okonomiyaki Parco', '1-1 Tsurufukuincho, Nara').
+
+    Creators who list venue + address in one chapter title put the name first.
+    The remainder is kept as an address only when it looks like one (contains
+    a digit or at least two comma-separated parts).
+    """
+    if "," not in raw:
+        return raw.strip(), ""
+    head, rest = raw.split(",", 1)
+    rest = rest.strip()
+    if rest and (re.search(r"\d", rest) or "," in rest):
+        return head.strip(), rest
+    return raw.strip(), ""
 
 
 def analyze_description_timestamps(
@@ -400,7 +460,7 @@ def analyze_description_timestamps(
     existing_names = {h["name"].lower() for h in intel.venue_hints}
     added = 0
     for entry in dts:
-        raw = (entry.get("label") or "").strip()
+        raw, address = _split_chapter_name_address((entry.get("label") or "").strip())
         if not raw or not _is_chapter_venue_name(raw):
             continue
         if raw.lower() in existing_names:
@@ -417,6 +477,8 @@ def analyze_description_timestamps(
             "source": "description_timestamp",
             "confidence": "high",
         }
+        if address:
+            hint["address"] = address
         if start_seconds is not None:
             hint["start_time"] = start_seconds
 
@@ -447,7 +509,7 @@ def analyze_chapters(chapters: list[dict], intel: VideoIntel) -> VideoIntel:
     existing_names = {h["name"].lower() for h in intel.venue_hints}
     added = 0
     for ch in chapters:
-        raw = (ch.get("title") or "").strip()
+        raw, address = _split_chapter_name_address((ch.get("title") or "").strip())
         if not raw or not _is_chapter_venue_name(raw):
             continue
         if raw.lower() in existing_names:
@@ -459,6 +521,8 @@ def analyze_chapters(chapters: list[dict], intel: VideoIntel) -> VideoIntel:
             "source": "chapter",
             "confidence": "very_high",
         }
+        if address:
+            hint["address"] = address
         if start_time is not None:
             hint["start_time"] = float(start_time)
 

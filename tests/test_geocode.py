@@ -124,6 +124,52 @@ class TestGeocodeLocaleCache:
         assert any(v is None for v in saved.values())
 
 
+class TestGeocodeNeedsALocation:
+    def _mock_nominatim(self, geocode_return):
+        geolocator = MagicMock()
+        geolocator.geocode.return_value = geocode_return
+        mock_exc = MagicMock()
+        mock_exc.GeocoderTimedOut = Exception
+        mock_exc.GeocoderServiceError = Exception
+        return geolocator, patch.dict(
+            "sys.modules",
+            {"geopy.geocoders": MagicMock(Nominatim=MagicMock(return_value=geolocator)), "geopy.exc": mock_exc},
+        )
+
+    def test_name_only_query_is_never_sent(self, monkeypatch):
+        """'Da Michele, Italy' resolves to SOME homonym somewhere in Italy and
+        that wrong point then passes OSM verification (same object). Without a
+        city or address the venue cannot be placed: return None, no request."""
+        import scripts.geocode_locales as gl
+
+        monkeypatch.setattr(gl, "_load_geocode_cache", lambda: {})
+        monkeypatch.setattr(gl, "_save_geocode_cache", lambda c: None)
+        monkeypatch.setattr(gl, "_rate_limit", lambda: None)
+
+        fake_location = MagicMock(latitude=40.85, longitude=14.26, address="Da Michele, Napoli", raw={"address": {"city": "Napoli"}})
+        geolocator, ctx = self._mock_nominatim(fake_location)
+        with ctx:
+            result = gl.geocode_locale("Da Michele", "")
+
+        assert result is None
+        geolocator.geocode.assert_not_called()
+
+    def test_every_query_carries_the_city(self, monkeypatch):
+        import scripts.geocode_locales as gl
+
+        monkeypatch.setattr(gl, "_load_geocode_cache", lambda: {})
+        monkeypatch.setattr(gl, "_save_geocode_cache", lambda c: None)
+        monkeypatch.setattr(gl, "_rate_limit", lambda: None)
+
+        geolocator, ctx = self._mock_nominatim(None)
+        with ctx:
+            gl.geocode_locale("Da Michele", "Roma")
+
+        queries = [c.args[0] for c in geolocator.geocode.call_args_list]
+        assert queries, "a city was given, so Nominatim must be asked"
+        assert all("Roma" in q for q in queries)
+
+
 class TestGeocodeExtractions:
     def test_geocodes_all_extractions(self, monkeypatch):
         import scripts.geocode_locales as gl

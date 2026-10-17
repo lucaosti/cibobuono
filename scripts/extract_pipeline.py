@@ -27,6 +27,7 @@ from scripts.extract_locales import (
     _is_valid_locale_name,
     _normalize_rating,
     _normalize_sentiment,
+    find_best_timestamp_in_transcript,
     get_llm,
 )
 from scripts.utils import CONFIDENCE_THRESHOLD, CONF_RULE_VISIT, CONF_BATCH_VISIT, CONF_CHAPTER_HINT
@@ -233,12 +234,19 @@ def _promote_venue_hints(
     extractions: list[dict],
     flagged: list[dict],
     perception_record: dict | None = None,
+    transcript: dict | None = None,
 ) -> None:
     """Promote ONLY structured, reliable hints (title/chapter) into extractions.
 
     Description- and comment-derived hints come from noisy regex/crowd text, so
     they are NOT promoted blindly; they only help confirm NER candidates and
     must still be geocoded/verified downstream.
+
+    When ``transcript`` is given, a hint is promoted only if its name is
+    corroborated by the speech (exact or token-fuzzy match anywhere in the
+    transcript); otherwise it is flagged ``hint_not_in_transcript``. A title
+    or chapter that names a street, a dish or a section is never spoken as a
+    venue, so this is what stops "VIA SANNIO"-style false positives.
     """
     if not video_intel or not video_intel.venue_hints:
         return
@@ -266,6 +274,12 @@ def _promote_venue_hints(
 
         conf = conf_map.get(str(h.get("confidence") or ""), 0.80)
         start = h.get("start_time")
+        corroborated = True
+        if transcript is not None:
+            spoken_at = find_best_timestamp_in_transcript(name, transcript)
+            corroborated = spoken_at is not None
+            if corroborated and start is None:
+                start = spoken_at
         conf = _final_confidence(conf, perception_record, name, float(start or 0.0))
         row = {
             "locale_name": name,
@@ -285,7 +299,10 @@ def _promote_venue_hints(
             "verified": False,
         }
 
-        if conf >= CONFIDENCE_THRESHOLD:
+        if not corroborated:
+            row["confidence"] = min(conf, 0.55)
+            flagged.append({**row, "_flag_reason": "hint_not_in_transcript"})
+        elif conf >= CONFIDENCE_THRESHOLD:
             extractions.append(row)
         else:
             flagged.append({**row, "_flag_reason": "hint_low_confidence"})
@@ -538,6 +555,15 @@ def extract_from_video(
                 continue
 
             decision, reason = classify_visit_rules(window, cand, ctx_by_label)
+            if decision == "visit" and llm is None:
+                # A regex hit alone is not evidence enough to publish a visit;
+                # without an LLM to verify it the candidate goes to review.
+                _append_flagged_candidate(
+                    flagged, cand, chunk,
+                    evidence=f"[rule:{reason}]", conf=CONF_RULE_VISIT,
+                    reason="no_llm_verification",
+                )
+                continue
             if decision == "visit":
                 detail_window = get_transcript_window(transcript, cand.start_time, 22.0) or window
                 detail = _detail_llm(llm, detail_window, name_clean, video_title) if llm else {}
@@ -679,7 +705,8 @@ def extract_from_video(
         extractions.append(best["row"])
 
     _promote_venue_hints(
-        video_intel, channel_rubriche, extractions, flagged, perception_record
+        video_intel, channel_rubriche, extractions, flagged, perception_record,
+        transcript=transcript,
     )
 
     extractions = _merge_extraction_rows(extractions, discovery_rows)

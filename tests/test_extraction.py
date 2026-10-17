@@ -105,6 +105,23 @@ class TestDetectRecipeVideo:
         is_r, _ = detect_recipe_video("LA MIGLIOR PIZZA DI ROMA")
         assert is_r is False
 
+    def test_recipe_word_with_venue_signal_is_not_skipped(self):
+        """Catalogued titles that were wrongly skipped at catalog time: the
+        episode is filmed in a restaurant even though the title says recipe."""
+        for title in (
+            "Il ristorante con le ricette della NONNA",
+            "Cucino con uno chef in un ristorante del centro",
+            "Cucino io una ricetta STELLATA in un ristorante stellato",
+            "Ricette criminali la PIZZA BIANCA romana",
+        ):
+            is_r, _ = detect_recipe_video(title)
+            assert is_r is False, title
+
+    def test_pure_recipe_still_skipped(self):
+        for title in ("La RICETTA del TIRAMISÙ", "Io resto a casa (e cucino) - pt.3"):
+            is_r, _ = detect_recipe_video(title)
+            assert is_r is True, title
+
 
 class TestIsValidLocaleName:
     """Test locale name validation rejects generic words and keeps proper names."""
