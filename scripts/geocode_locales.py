@@ -161,6 +161,15 @@ def geocode_locale(
         return None
 
     city = _clean_city(city)
+    address = (address or "").strip()
+    if not city and not address:
+        # A bare "<name>, Italy" query resolves to SOME homonym somewhere in the
+        # country, and that wrong point then passes OSM verification (it is the
+        # very object Nominatim returned). Without a city or an address the
+        # venue cannot be placed: leave it for review instead of guessing.
+        logger.info(f"Geocode skipped for '{name}': no city or address to anchor the query")
+        return None
+
     cache_key = f"{name}|{city}|{address}".lower().strip()
     cache = _load_geocode_cache()
     if cache_key in cache:
@@ -176,9 +185,11 @@ def geocode_locale(
     if address and city:
         queries.append(f"{name}, {address}, {city}, {country}")
         queries.append(f"{address}, {city}, {country}")
+    elif address:
+        queries.append(f"{name}, {address}, {country}")
+        queries.append(f"{address}, {country}")
     if city:
         queries.append(f"{name}, {city}, {country}")
-    queries.append(f"{name}, {country}")
 
     for query in queries:
         try:

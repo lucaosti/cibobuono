@@ -113,11 +113,23 @@ NON_FOOD_KEYWORDS = [
 ]
 
 
+# A recipe word next to a venue word ("Cucino con uno chef in un ristorante",
+# "Il ristorante con le ricette della nonna") is an on-location episode, not a
+# home recipe: such titles stay pending and the food gate decides later.
+_VENUE_SIGNAL_RE = re.compile(
+    r"\b(?:ristorant[ei]|pizzeri[ae]|trattori[ae]|osteri[ae]|forn[oi]|panifici[oi]|"
+    r"pasticceri[ae]|gelateri[ae]|rosticceri[ae]|friggitori[ae]|chef|criminal[ei]|stellat[oaie])\b",
+    re.IGNORECASE,
+)
+
+
 def detect_recipe_video(title: str) -> tuple[bool, str]:
     """Return (True, reason) if the title suggests a recipe/cooking video."""
     title_lower = title.lower().strip()
     for kw in RECIPE_KEYWORDS:
         if kw in title_lower:
+            if _VENUE_SIGNAL_RE.search(title):
+                return False, ""
             return True, f'Recipe keyword in title: "{kw}"'
     return False, ""
 

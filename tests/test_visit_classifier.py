@@ -39,6 +39,29 @@ def test_rule_accepts_visit_pattern_with_food():
     assert "visit_pattern" in reason
 
 
+def test_rule_does_not_call_comparison_with_rating_a_visit():
+    """Real false positive (video vxsehTvyfNs): the benchmark bakery in another
+    city is named next to a grade and a food noun, but the host is not there."""
+    w = (
+        "Considerando che il 10 lo lasciamo a Panificio Fiore a Santa Rita a Bari, "
+        "questa focaccia stile barese è da 8."
+    )
+    d, _ = classify_visit_rules(w, _cand("Panificio Fiore"), {})
+    assert d != "visit"
+
+
+def test_rule_does_not_call_past_visit_a_visit():
+    w = "La settimana scorsa siamo stati da Bonci, buonissimo il trapizzino, ma oggi siamo qui."
+    d, _ = classify_visit_rules(w, _cand("Bonci"), {})
+    assert d != "visit"
+
+
+def test_rule_still_accepts_clear_on_site_visit():
+    w = "Eccoci da Bonci, entriamo e ordiniamo il trapizzino: 3 euro e 50, voto 8."
+    d, _ = classify_visit_rules(w, _cand("Bonci"), {})
+    assert d == "visit"
+
+
 def test_blacklist_city_without_food():
     ctx = {"city": {"roma"}}
     w = "A Roma piove spesso in autunno."
