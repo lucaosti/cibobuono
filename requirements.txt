@@ -32,7 +32,7 @@ sherpa-onnx>=1.10.0
 numpy>=1.26.0
 
 # Perceptor — video frame sampling + perceptual-hash novelty dedup
-av>=12.0.0
+av>=12.0.0,<19  # faster-whisper passes metadata_errors, removed in PyAV 19
 imagehash>=4.3.1
 
 # Perceptor — Apple Silicon GPU (Metal) backends for ASR and VLM captioning.

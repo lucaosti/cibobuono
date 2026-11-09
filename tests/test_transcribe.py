@@ -200,3 +200,42 @@ class TestMlxBackendSelection:
 
         assert backend == tv._BACKEND_FASTER
         assert isinstance(model, FakeWhisperModel)
+
+
+class TestOfflineManualSubs:
+    """Compute nodes without internet: subtitles are fetched beforehand and
+    transcription must not touch the network."""
+
+    VTT = (
+        "WEBVTT\n\n"
+        "00:00:01.000 --> 00:00:03.000\nSiamo da Bonci a Roma.\n\n"
+        "00:00:03.000 --> 00:00:05.000\nOrdiniamo il trapizzino.\n"
+    )
+
+    @pytest.fixture
+    def cache(self, tmp_path, monkeypatch):
+        import scripts.transcribe_video as tv
+
+        monkeypatch.setattr(tv, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(tv, "ensure_dirs", lambda: None)
+
+        def no_network(*a, **k):
+            raise AssertionError("network fetch attempted")
+
+        monkeypatch.setattr(tv, "_download_youtube_manual_subs", no_network)
+        return tmp_path
+
+    def test_uses_prefetched_subs_without_network(self, cache):
+        import scripts.transcribe_video as tv
+
+        (cache / "vid1_subs.it.vtt").write_text(self.VTT, encoding="utf-8")
+        transcript = tv.transcribe_audio("vid1", fetch_subs=False)
+        assert transcript["source"] == "youtube_subs_manual"
+        assert "Bonci" in transcript["text"]
+        assert (cache / "vid1_transcript.json").exists()
+
+    def test_no_subs_falls_through_to_whisper_without_network(self, cache, monkeypatch):
+        import scripts.transcribe_video as tv
+
+        monkeypatch.setattr(tv, "find_audio_file", lambda vid: None)
+        assert tv.transcribe_audio("vid2", fetch_subs=False) is None
