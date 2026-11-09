@@ -92,18 +92,18 @@ def _download_youtube_manual_subs(video_id: str) -> Path | None:
             timeout=60,
         )
 
-        for suffix in [".it.vtt", ".it.srt"]:
-            candidate = CACHE_DIR / f"{video_id}_subs{suffix}"
-            if candidate.exists() and candidate.stat().st_size > 100:
-                logger.info(
-                    f"Downloaded YouTube manual subs for {video_id}: "
-                    f"{candidate.name} ({candidate.stat().st_size} bytes)"
-                )
-                return candidate
-
     except (subprocess.TimeoutExpired, Exception) as e:
         logger.debug(f"Manual sub download failed for {video_id}: {e}")
 
+    return _cached_manual_subs(video_id)
+
+
+def _cached_manual_subs(video_id: str) -> Path | None:
+    """Path of manual subtitles already in the cache, or None."""
+    for suffix in [".it.vtt", ".it.srt"]:
+        candidate = CACHE_DIR / f"{video_id}_subs{suffix}"
+        if candidate.exists() and candidate.stat().st_size > 100:
+            return candidate
     logger.info(f"No YouTube manual subtitles available for {video_id}")
     return None
 
@@ -441,7 +441,9 @@ def _write_transcript_atomic(path: Path, transcript: dict) -> None:
         raise
 
 
-def transcribe_audio(video_id: str, model_name: str = WHISPER_DEFAULT_MODEL) -> dict | None:
+def transcribe_audio(
+    video_id: str, model_name: str = WHISPER_DEFAULT_MODEL, fetch_subs: bool = True
+) -> dict | None:
     """
     Get transcription for a video.
 
@@ -456,6 +458,8 @@ def transcribe_audio(video_id: str, model_name: str = WHISPER_DEFAULT_MODEL) -> 
     Args:
         video_id: YouTube video ID
         model_name: Whisper model size (default: large-v3-turbo)
+        fetch_subs: download manual subtitles; when False only subtitles
+            already in the cache are used (hosts without internet access)
 
     Returns:
         dict with 'text' (full transcript) and 'segments' (timestamped chunks)
@@ -474,7 +478,7 @@ def transcribe_audio(video_id: str, model_name: str = WHISPER_DEFAULT_MODEL) -> 
             logger.warning(f"Cached transcription corrupted, re-transcribing: {video_id}")
 
     # --- Strategy 1: YouTube *manual* subtitles (rare, but best when present) ---
-    subs_path = _download_youtube_manual_subs(video_id)
+    subs_path = _download_youtube_manual_subs(video_id) if fetch_subs else _cached_manual_subs(video_id)
     if subs_path:
         transcript = _parse_vtt(subs_path)
         if transcript and len(transcript.get("segments", [])) > 0:

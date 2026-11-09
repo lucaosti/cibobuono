@@ -14,13 +14,17 @@ gold set that the production chain is measured against:
    venue name and is the host on site there. These are the gold labels for
    precision / recall of the current rules + arbiter.
 
-Runs on any llama.cpp-capable machine; written for a single large GPU
-(72B Q4 GGUF on a 94 GB card). Model path, context size and offload are CLI
-arguments so the same script serves the smaller production models.
+Two backends: a local GGUF through llama.cpp (``--model MODEL.gguf``), or any
+OpenAI-compatible server such as vLLM (``--server URL --model SERVED_NAME``).
+With ``--frames DIR`` (``DIR/<video_id>/<seconds>.jpg``, written by
+:mod:`scripts.sample_frames`) the frames are attached to the request so a
+vision-language teacher can read signs, menus and on-screen captions.
 
 CLI:
     python -m scripts.teacher_label --model MODEL.gguf --meta meta.json \
         --transcripts DIR [--trace trace.jsonl] --out labels.jsonl
+    python -m scripts.teacher_label --server http://127.0.0.1:8000/v1 --model NAME \
+        --meta meta.json --transcripts DIR --frames FRAMES --out labels.jsonl --max-tokens 16384
 """
 
 from __future__ import annotations
@@ -28,8 +32,10 @@ from __future__ import annotations
 __author__ = "Luca Ostinelli"
 
 import argparse
+import base64
 import json
 import time
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
@@ -81,6 +87,12 @@ _VENUE_USER = (
     "- Empty list if the video is not an on-location food visit."
 )
 
+_FRAMES_NOTE = (
+    "\n\nFRAMES: still frames sampled from the video follow, each preceded by its timestamp. "
+    "Use shop signs, menus, receipts, price boards and on-screen captions to read business "
+    "names, addresses and grades; when a name comes from a frame, add \"frame\" to name_source."
+)
+
 _CAND_SYSTEM = (
     "You label spans extracted by a named-entity model from Italian food-vlog "
     "transcripts. For each span decide whether it is the proper name of a specific "
@@ -117,14 +129,49 @@ def _load_model(model_path: str, n_ctx: int, n_gpu_layers: int):
         return Llama(**kwargs)
 
 
-def _chat_json(llm, system: str, user: str, max_tokens: int) -> dict:
+class OpenAIChat:
+    """Client for an OpenAI-compatible server with llama.cpp's ``create_chat_completion`` shape."""
+
+    def __init__(self, base_url: str, model: str, temperature: float = 0.0, timeout: float = 1800):
+        self.url = base_url.rstrip("/") + "/chat/completions"
+        self.model = model
+        self.temperature = temperature
+        self.timeout = timeout
+
+    def create_chat_completion(self, *, messages, max_tokens, temperature, response_format) -> dict:
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": self.temperature,
+            "response_format": response_format,
+        }
+        request = urllib.request.Request(
+            self.url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return json.load(response)
+
+
+def frame_parts(frame_dir: Path) -> list[dict]:
+    """Timestamp + image content parts for every ``<seconds>.jpg`` in *frame_dir*, in time order."""
+    parts: list[dict] = []
+    for path in sorted(frame_dir.glob("*.jpg"), key=lambda p: int(p.stem)):
+        data = base64.b64encode(path.read_bytes()).decode()
+        parts.append({"type": "text", "text": f"[{seconds_to_timestamp(int(path.stem))}]"})
+        parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}})
+    return parts
+
+
+def _chat_json(llm, system: str, user: str, max_tokens: int, images: list[dict] | None = None) -> dict:
+    content = [{"type": "text", "text": user + _FRAMES_NOTE}, *images] if images else user
     response = llm.create_chat_completion(
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": content}],
         max_tokens=max_tokens,
         temperature=0.0,
         response_format={"type": "json_object"},
     )
-    text = response["choices"][0]["message"]["content"].strip()
+    text = (response["choices"][0]["message"]["content"] or "").strip()
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
@@ -155,7 +202,14 @@ def _chapter_lines(chapters: list[dict] | None) -> str:
     return "\n".join(out) if out else "(none)"
 
 
-def label_video(llm, meta: dict, transcript: dict, *, max_tokens: int = 1800) -> dict:
+def label_video(
+    llm, meta: dict, transcript: dict, *, max_tokens: int = 1800, images: list[dict] | None = None
+) -> dict | None:
+    """Venue labels for one video, or None when the reply is empty or not JSON.
+
+    A thinking model that spends the whole budget reasoning returns no content;
+    that is a failed call, not a video without venues.
+    """
     from scripts.video_intelligence import analyze_title
 
     intel = analyze_title(meta.get("title", ""))
@@ -167,7 +221,9 @@ def label_video(llm, meta: dict, transcript: dict, *, max_tokens: int = 1800) ->
         description=(meta.get("description") or "")[:MAX_DESCRIPTION_CHARS],
         transcript=_timestamped(transcript, MAX_TRANSCRIPT_CHARS),
     )
-    data = _chat_json(llm, _VENUE_SYSTEM, user, max_tokens)
+    data = _chat_json(llm, _VENUE_SYSTEM, user, max_tokens, images)
+    if not data:
+        return None
     venues = [v for v in (data.get("venues") or []) if isinstance(v, dict)]
     return {"video_type": data.get("video_type", ""), "venues": venues}
 
@@ -204,7 +260,11 @@ def label_candidates(llm, title: str, rows: list[dict], *, batch_size: int = 12)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Teacher-LLM venue labels for evaluation")
-    parser.add_argument("--model", required=True, help="GGUF path (first shard for split files)")
+    parser.add_argument("--model", required=True, help="GGUF path (first shard), or the served model name with --server")
+    parser.add_argument("--server", default=None, help="OpenAI-compatible base URL, e.g. http://127.0.0.1:8000/v1")
+    parser.add_argument("--frames", type=Path, default=None, help="directory with <video_id>/<seconds>.jpg")
+    parser.add_argument("--max-tokens", type=int, default=1800, help="output budget (raise for thinking models)")
+    parser.add_argument("--temperature", type=float, default=0.0, help="sampling temperature (server backend)")
     parser.add_argument("--meta", required=True, type=Path, help="JSON list of {video_id,title,description,chapters}")
     parser.add_argument("--transcripts", required=True, type=Path, help="directory with <video_id>_transcript.json")
     parser.add_argument("--trace", type=Path, default=None, help="trace JSONL from scripts.trace_candidates")
@@ -231,8 +291,12 @@ def main() -> int:
         with open(args.out, encoding="utf-8") as f:
             done = {json.loads(l)["video_id"] for l in f if l.strip()}
 
-    llm = _load_model(args.model, args.n_ctx, args.n_gpu_layers)
-    model_name = Path(args.model).name
+    if args.server:
+        llm = OpenAIChat(args.server, args.model, temperature=args.temperature)
+        model_name = args.model
+    else:
+        llm = _load_model(args.model, args.n_ctx, args.n_gpu_layers)
+        model_name = Path(args.model).name
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "a", encoding="utf-8") as out:
@@ -246,13 +310,24 @@ def main() -> int:
                 continue
             transcript = json.loads(tpath.read_text(encoding="utf-8"))
             t0 = time.time()
-            result = label_video(llm, meta, transcript)
+            images = None
+            if args.frames and (args.frames / vid).is_dir():
+                images = frame_parts(args.frames / vid)
+            result = label_video(llm, meta, transcript, max_tokens=args.max_tokens, images=images)
+            if result is None:
+                logger.warning(f"{vid}: empty reply, retrying with {2 * args.max_tokens} tokens")
+                result = label_video(llm, meta, transcript, max_tokens=2 * args.max_tokens, images=images)
+            if result is None:
+                # Not written, so a resumed run labels it again.
+                logger.error(f"{vid}: empty reply twice, skipped")
+                continue
             cand_rows = trace_by_video.get(vid, [])
             labels = label_candidates(llm, meta.get("title", ""), cand_rows) if cand_rows else []
             record = {
                 "video_id": vid,
                 "title": meta.get("title", ""),
                 "model": model_name,
+                "frames": len(images or []) // 2,
                 "video_type": result["video_type"],
                 "venues": result["venues"],
                 "candidate_labels": labels,
